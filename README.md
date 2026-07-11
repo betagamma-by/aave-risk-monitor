@@ -5,13 +5,13 @@ which borrowers are closest to liquidation, which collateral assets are
 most exposed, and what happens under hypothetical price-drop scenarios.
 
 ## 📊 Live Dashboard (Part A — Dune Analytics)
-[View on Dune Analytics](YOUR_DUNE_URL_HERE)
+[View on Dune Analytics](https://dune.com/betagamma/aave-v3-liquidation-risk-monitor)
 
 Historical liquidation activity, borrower trends, and stress scenarios
 built entirely in SQL against decoded on-chain event logs.
 
 ## 🖥️ Live App (Part B — Python + Streamlit)
-[View Live App](YOUR_STREAMLIT_URL_HERE)
+[View Live App](https://aave-risk-monitor-9syd5qjjfcasllzflvjwh5.streamlit.app/)
 
 Live position monitoring: pulls active borrower data from a **self-deployed
 Aave V3 subgraph** on The Graph Studio, computes health factor per wallet
