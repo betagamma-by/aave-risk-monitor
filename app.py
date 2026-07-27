@@ -18,7 +18,13 @@ with st.spinner("Fetching live on-chain data..."):
         positions_df = fetch_high_risk_positions(top_reserves=5, borrowers_per_reserve=15)
         data_ok = not positions_df.empty
     except Exception as e:
-        st.error(f"Data fetch failed: {e}")
+        st.warning(
+            "⚠️ Live subgraph endpoint is temporarily unavailable. "
+            "This project uses a self-deployed subgraph on The Graph's free "
+            "testing tier, which is periodically archived after inactivity "
+            "(per The Graph's Fair Use Policy). See the GitHub README for "
+            "redeployment instructions."
+        )
         data_ok = False
 
 if not data_ok:
