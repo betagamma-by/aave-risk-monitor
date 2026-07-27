@@ -66,6 +66,22 @@ is part of the analysis, not something to hide.
   candidate wallets are identified by sorting within one reserve at a
   time, where the comparison is valid.
 
+## Note on Live Data Availability
+
+This project's live subgraph runs on The Graph Studio's free testing tier,
+which is subject to periodic archival after inactivity (per The Graph's
+Fair Use Policy). If the live app shows a connection warning, the subgraph
+has likely been archived.
+
+To redeploy it, clone Aave's official subgraph source
+([github.com/aave/protocol-subgraphs](https://github.com/aave/protocol-subgraphs))
+and run:
+
+\`\`\`bash
+VERSION=v3 BLOCKCHAIN=v3 NETWORK=mainnet npm run prepare:subgraph
+SLUG=aave-v-3-risk-monitor npm run subgraph:deploy
+\`\`\`
+
 ## Tech Stack
 
 - SQL (Dune Analytics / Trino)
