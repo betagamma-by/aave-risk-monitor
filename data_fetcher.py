@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 
-SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1756180/aave-v-3-risk-monitor/v0.0.1"
+SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1756180/aave-v-3-risk-monitor/v0.0.2"
 
 SYMBOL_TO_COINGECKO_ID = {
     "WETH": "ethereum", "WBTC": "wrapped-bitcoin", "USDC": "usd-coin",
