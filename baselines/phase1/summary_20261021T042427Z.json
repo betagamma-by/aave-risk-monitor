@@ -1,0 +1,52 @@
+{
+  "captured_utc": "20261021T042427Z",
+  "git_commit": "3b2bdc689b0f5969b9af90f8b743f25109241d7e",
+  "top5_reserves_as_selected": [
+    {
+      "symbol": "DAI",
+      "decimals": 18,
+      "totalCurrentVariableDebt": "114699001150467486163682471"
+    },
+    {
+      "symbol": "GHO",
+      "decimals": 18,
+      "totalCurrentVariableDebt": "107213537480501433777016206"
+    },
+    {
+      "symbol": "USDe",
+      "decimals": 18,
+      "totalCurrentVariableDebt": "12107554569510765702137263"
+    },
+    {
+      "symbol": "USDtb",
+      "decimals": 18,
+      "totalCurrentVariableDebt": "7998985234752419060971445"
+    },
+    {
+      "symbol": "RLUSD",
+      "decimals": 18,
+      "totalCurrentVariableDebt": "2432612089840154084518850"
+    }
+  ],
+  "wallets_in_final_table": 75,
+  "wallets_excluded_unpriced_collateral": 0,
+  "tier_counts": {
+    "SAFE": 61,
+    "ELEVATED (HF 1.2\u20131.5)": 9,
+    "HIGH (HF 1.05\u20131.2)": 4,
+    "CRITICAL (HF < 1.05)": 1
+  },
+  "total_debt_usd": 318109833.36,
+  "hf_describe": {
+    "count": 75.0,
+    "mean": 2.16576,
+    "std": 0.945296860136425,
+    "min": 0.8228,
+    "5%": 1.1272,
+    "25%": 1.54385,
+    "50%": 2.0254,
+    "75%": 2.4337,
+    "95%": 3.4150799999999997,
+    "max": 7.0654
+  }
+}
