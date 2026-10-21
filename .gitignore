@@ -3,3 +3,4 @@ __pycache__/
 .env
 .DS_Storevenv/
 *.pyc
+.DS_Store
