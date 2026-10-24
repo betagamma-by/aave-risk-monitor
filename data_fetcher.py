@@ -1,6 +1,7 @@
 import requests
 import pandas as pd
 import time 
+import os 
 
 SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1756180/aave-v-3-risk-monitor/v0.0.2"
 
@@ -49,6 +50,48 @@ def fetch_live_prices(symbols: set) -> dict:
     id_to_symbol = {v: k for k, v in SYMBOL_TO_COINGECKO_ID.items()}
     return {id_to_symbol[cg_id]: info["usd"] for cg_id, info in data.items() if cg_id in id_to_symbol}
 
+ORACLE_ABI = [
+    {"name": "getAssetsPrices", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "assets", "type": "address[]"}],
+     "outputs": [{"name": "", "type": "uint256[]"}]},
+    {"name": "getAssetPrice", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "asset", "type": "address"}],
+     "outputs": [{"name": "", "type": "uint256"}]},
+    {"name": "BASE_CURRENCY_UNIT", "type": "function", "stateMutability": "view",
+     "inputs": [], "outputs": [{"name": "", "type": "uint256"}]},
+]
+
+
+def fetch_aave_prices(addresses):
+    """USD price per underlying address, straight from Aave's oracle. Keys are lowercase."""
+    from web3 import Web3
+    w3 = Web3(Web3.HTTPProvider(os.environ["ETH_RPC_URL"], request_kwargs={"timeout": 20}))
+    oracle = w3.eth.contract(address=Web3.to_checksum_address(os.environ["AAVE_ORACLE_ADDRESS"]),
+                             abi=ORACLE_ABI)
+    unit = oracle.functions.BASE_CURRENCY_UNIT().call()   # fails loudly if this isn't the oracle
+    addrs = sorted(addresses)
+    checksummed = [Web3.to_checksum_address(a) for a in addrs]
+    try:
+        raw_prices = oracle.functions.getAssetsPrices(checksummed).call()
+        prices = dict(zip(addrs, raw_prices))
+    except Exception:
+        prices = {}                                         # batch failed: try one by one
+        for a, c in zip(addrs, checksummed):
+            try:
+                prices[a] = oracle.functions.getAssetPrice(c).call()
+            except Exception:
+                prices[a] = 0
+    return {a: p / unit for a, p in prices.items() if p > 0}
+
+
+def build_prices(raw):
+    """Aave oracle if the env vars are set, otherwise the old CoinGecko path."""
+    addrs = set(raw["underlying"])
+    if os.environ.get("ETH_RPC_URL") and os.environ.get("AAVE_ORACLE_ADDRESS"):
+        return fetch_aave_prices(addrs), "aave-oracle"
+    sym = raw.drop_duplicates("underlying").set_index("underlying")["symbol"].to_dict()
+    cg = fetch_live_prices({s for s in sym.values() if not is_pendle_pt_token(s)})
+    return {a: cg[s] for a, s in sym.items() if s in cg}, "coingecko"
 
 def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
     """One row per wallet-reserve, raw values kept as the subgraph returns them."""
@@ -105,8 +148,9 @@ def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
 
 
 def compute_positions(raw, prices):
+    """prices: {lowercase underlying address: USD price}."""
     stats = {"wallets_fetched": 0, "wallets_in_emode": 0, "excluded_unpriced_collateral": 0,
-             "wallets_with_ignored_debt": 0, "dropped_debt_under_100": 0}
+             "excluded_unpriced_debt": 0, "dropped_debt_under_100": 0}
     if raw.empty:
         return pd.DataFrame(), stats
     stats["wallets_fetched"] = int(raw["wallet"].nunique())
@@ -115,44 +159,46 @@ def compute_positions(raw, prices):
     rows = []
     for wallet, g in raw.groupby("wallet"):
         collateral_usd = debt_usd = weighted = weighted_base = max_val = 0.0
-        primary, unpriced_collateral, ignored_debt = None, False, False
+        primary, unpriced_collateral, unpriced_debt = None, False, False
 
         for r in g.itertuples():
-            balance_raw, debt_raw = float(r.atoken_balance_raw), float(r.debt_raw)
-            price = 0 if is_pendle_pt_token(r.symbol) else prices.get(r.symbol, 0)
+            scale = 10 ** r.decimals
+            balance_tokens = float(r.atoken_balance_raw) / scale
+            debt_tokens = float(r.debt_raw) / scale
+            price = prices.get(r.underlying, 0)
             if price == 0:
-                if r.collateral_enabled and balance_raw > 0:
+                if r.collateral_enabled and balance_tokens > 0.01:
                     unpriced_collateral = True
-                if debt_raw > 0:
-                    ignored_debt = True  # diagnostic: this debt is counted as $0 (fix F4 later)
+                if debt_tokens > 0.01:          # ignore dust
+                    unpriced_debt = True
                 continue
             if r.collateral_enabled:
-                val = balance_raw / 10 ** r.decimals * price
+                val = balance_tokens * price
                 collateral_usd += val
                 weighted_base += val * r.base_lt_bps / 10000
                 weighted += val * (r.emode_lt_bps or r.base_lt_bps) / 10000
                 if val > max_val:
                     max_val, primary = val, r.symbol
-            debt_usd += debt_raw / 10 ** r.decimals * price
+            debt_usd += debt_tokens * price
 
         if unpriced_collateral:
             stats["excluded_unpriced_collateral"] += 1
             continue
-        if ignored_debt:
-            stats["wallets_with_ignored_debt"] += 1
+        if unpriced_debt:
+            stats["excluded_unpriced_debt"] += 1
+            continue
         if debt_usd < 100:
             stats["dropped_debt_under_100"] += 1
             continue
 
         hf = weighted / debt_usd
-        hf_base = weighted_base / debt_usd  # old logic: base thresholds only
         rows.append({
             "wallet": wallet[:10] + "...",
             "wallet_full": wallet,
             "collateral_usd": round(collateral_usd, 2),
             "debt_usd": round(debt_usd, 2),
             "health_factor": round(hf, 4),
-            "health_factor_base": round(hf_base, 4),
+            "health_factor_base": round(weighted_base / debt_usd, 4),
             "emode_id": int(g["emode_id"].iloc[0]),
             "primary_collateral": primary or "Unknown",
             "risk_tier": (
@@ -163,8 +209,6 @@ def compute_positions(raw, prices):
             ),
         })
 
-    if stats["excluded_unpriced_collateral"]:
-        print(f"ℹ️ Excluded {stats['excluded_unpriced_collateral']} wallet(s) with unpriceable collateral (e.g. Pendle PT positions)")
     df = pd.DataFrame(rows)
     return (df.sort_values("health_factor").head(75) if not df.empty else df), stats
 
@@ -173,15 +217,11 @@ def fetch_high_risk_positions(top_reserves=5, borrowers_per_reserve=15):
     raw = fetch_raw_positions(top_reserves, borrowers_per_reserve)
     if raw.empty:
         return pd.DataFrame()
-    all_symbols = set(raw["symbol"])
-    tradeable = {s for s in all_symbols if not is_pendle_pt_token(s)}
-    prices = fetch_live_prices(tradeable)
-    missing = tradeable - set(prices.keys())
-    pt_symbols = all_symbols - tradeable
-    if missing:
-        print(f"⚠️ No price found for (non-PT): {missing}")
-    if pt_symbols:
-        print(f"ℹ️ Excluded Pendle PT collateral (unsupported pricing): {pt_symbols}")
+    prices, source = build_prices(raw)
+    unpriced = sorted(set(raw.loc[~raw["underlying"].isin(prices), "symbol"]))
+    if unpriced:
+        print(f"⚠️ No price for: {unpriced}")
     df, stats = compute_positions(raw, prices)
+    stats["price_source"] = source
     print("STATS:", stats)
     return df
