@@ -93,14 +93,31 @@ def build_prices(raw):
     cg = fetch_live_prices({s for s in sym.values() if not is_pendle_pt_token(s)})
     return {a: cg[s] for a, s in sym.items() if s in cg}, "coingecko"
 
+def rank_reserves_by_usd(top_n):
+    """Pick the reserves with the largest USD debt (variable + stable), not raw token units."""
+    res = _gql("""{ reserves(first: 200) { id symbol decimals underlyingAsset
+                   totalCurrentVariableDebt totalPrincipalStableDebt } }""")["reserves"]
+    df = pd.DataFrame(res)
+    if df.empty:
+        raise ValueError("No reserves found")
+    df["underlying"] = df["underlyingAsset"].str.lower()
+    prices, source = build_prices(df[["underlying", "symbol"]])
+    tokens = (df["totalCurrentVariableDebt"].astype(float)
+              + df["totalPrincipalStableDebt"].astype(float)) / 10.0 ** df["decimals"].astype(int)
+    df["debt_usd"] = tokens * df["underlying"].map(prices).fillna(0)
+
+    unpriced = sorted(df.loc[(tokens > 1) & ~df["underlying"].isin(prices), "symbol"])
+    if unpriced:
+        print(f"⚠️ Reserves with debt but no price (not ranked): {unpriced}")
+    ranked = df[df["debt_usd"] > 0].sort_values("debt_usd", ascending=False)
+    print(f"Reserves ranked by USD debt ({source}); top 10:")
+    print(ranked.head(10).assign(debt_usd_M=lambda x: (x["debt_usd"] / 1e6).round(1))
+          [["symbol", "debt_usd_M"]].to_string(index=False))
+    return ranked.head(top_n)[["id", "symbol"]].to_dict("records")
+
 def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
     """One row per wallet-reserve, raw values kept as the subgraph returns them."""
-    reserves = _gql(
-        "{ reserves(first: %d, orderBy: totalCurrentVariableDebt, orderDirection: desc) { id symbol } }"
-        % top_reserves
-    )["reserves"]
-    if not reserves:
-        raise ValueError("No reserves found")
+    reserves = rank_reserves_by_usd(top_reserves)
 
     wallets = set()
     for r in reserves:
@@ -115,7 +132,7 @@ def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
 
     wallets_filter = str(sorted(wallets)).replace("'", '"')
     users = _gql(
-        """{ users(where: { id_in: %s }) {
+        """{ users(first: 1000, where: { id_in: %s }){
             id
             eModeCategoryId { id liquidationThreshold assets { asset collateral } }
             reserves { currentATokenBalance currentTotalDebt usageAsCollateralEnabledOnUser
@@ -145,7 +162,6 @@ def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
                 "emode_lt_bps": cat_lt if in_category else 0,  # 0 = no eMode boost for this asset
             })
     return pd.DataFrame(rows)
-
 
 def compute_positions(raw, prices):
     """prices: {lowercase underlying address: USD price}."""
@@ -210,8 +226,7 @@ def compute_positions(raw, prices):
         })
 
     df = pd.DataFrame(rows)
-    return (df.sort_values("health_factor").head(75) if not df.empty else df), stats
-
+    return (df.sort_values("health_factor") if not df.empty else df), stats
 
 def fetch_high_risk_positions(top_reserves=5, borrowers_per_reserve=15):
     raw = fetch_raw_positions(top_reserves, borrowers_per_reserve)
