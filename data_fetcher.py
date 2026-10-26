@@ -117,11 +117,56 @@ def rank_reserves_by_usd(top_n):
           [["symbol", "debt_usd_M"]].to_string(index=False))
     return ranked.head(top_n)[["id", "symbol"]].to_dict("records")
 
-def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
-    """One row per wallet-reserve. Keeps the subgraph's last-update balances AND the scaled
-    balances plus reserve indexes needed to grow them to today."""
-    reserves = rank_reserves_by_usd(top_reserves)
+def fetch_raw_for_wallets(wallets):
+    """Detailed positions for the given wallet ids: one row per wallet-reserve."""
+    wallets = sorted(wallets)
+    rows = []
+    for i in range(0, len(wallets), 100):               # batches of 100 keep each query small
+        wallets_filter = str(wallets[i:i + 100]).replace("'", '"')
+        users = _gql(
+            """{ users(first: 1000, where: { id_in: %s }) {
+                id
+                eModeCategoryId { id liquidationThreshold assets { asset collateral } }
+                reserves { currentATokenBalance currentTotalDebt usageAsCollateralEnabledOnUser
+                    scaledATokenBalance scaledVariableDebt currentStableDebt
+                    reserve { symbol decimals reserveLiquidationThreshold underlyingAsset
+                        liquidityIndex variableBorrowIndex liquidityRate variableBorrowRate
+                        lastUpdateTimestamp } } } }"""
+            % wallets_filter
+        )["users"]
+        for u in users:
+            cat = u.get("eModeCategoryId")
+            cat_id = int(cat["id"]) if cat else 0
+            cat_lt = int(cat["liquidationThreshold"]) if cat else 0
+            cat_collateral = {a["asset"].lower() for a in cat["assets"] if a["collateral"]} if cat else set()
+            for r in u.get("reserves", []):
+                res = r["reserve"]
+                in_category = res["underlyingAsset"].lower() in cat_collateral
+                rows.append({
+                    "wallet": u["id"],
+                    "symbol": res["symbol"],
+                    "underlying": res["underlyingAsset"].lower(),
+                    "decimals": int(res["decimals"]),
+                    "base_lt_bps": int(res["reserveLiquidationThreshold"]),
+                    "atoken_balance_raw": r["currentATokenBalance"],
+                    "debt_raw": r["currentTotalDebt"],
+                    "collateral_enabled": bool(r["usageAsCollateralEnabledOnUser"]),
+                    "emode_id": cat_id,
+                    "emode_lt_bps": cat_lt if in_category else 0,
+                    "scaled_atoken_raw": r["scaledATokenBalance"],
+                    "scaled_vdebt_raw": r["scaledVariableDebt"],
+                    "stable_debt_raw": r["currentStableDebt"],
+                    "liq_index": res["liquidityIndex"],
+                    "borrow_index": res["variableBorrowIndex"],
+                    "liq_rate": res["liquidityRate"],
+                    "borrow_rate": res["variableBorrowRate"],
+                    "reserve_updated_ts": res["lastUpdateTimestamp"],
+                })
+    return pd.DataFrame(rows)
 
+
+def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
+    reserves = rank_reserves_by_usd(top_reserves)
     wallets = set()
     for r in reserves:
         d = _gql(
@@ -132,50 +177,7 @@ def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
         wallets |= {ur["user"]["id"] for ur in d["userReserves"]}
     if not wallets:
         return pd.DataFrame()
-
-    wallets_filter = str(sorted(wallets)).replace("'", '"')
-    users = _gql(
-        """{ users(first: 1000, where: { id_in: %s }) {
-            id
-            eModeCategoryId { id liquidationThreshold assets { asset collateral } }
-            reserves { currentATokenBalance currentTotalDebt usageAsCollateralEnabledOnUser
-                scaledATokenBalance scaledVariableDebt currentStableDebt
-                reserve { symbol decimals reserveLiquidationThreshold underlyingAsset
-                    liquidityIndex variableBorrowIndex liquidityRate variableBorrowRate
-                    lastUpdateTimestamp } } } }"""
-        % wallets_filter
-    )["users"]
-
-    rows = []
-    for u in users:
-        cat = u.get("eModeCategoryId")
-        cat_id = int(cat["id"]) if cat else 0
-        cat_lt = int(cat["liquidationThreshold"]) if cat else 0
-        cat_collateral = {a["asset"].lower() for a in cat["assets"] if a["collateral"]} if cat else set()
-        for r in u.get("reserves", []):
-            res = r["reserve"]
-            in_category = res["underlyingAsset"].lower() in cat_collateral
-            rows.append({
-                "wallet": u["id"],
-                "symbol": res["symbol"],
-                "underlying": res["underlyingAsset"].lower(),
-                "decimals": int(res["decimals"]),
-                "base_lt_bps": int(res["reserveLiquidationThreshold"]),
-                "atoken_balance_raw": r["currentATokenBalance"],   # as of the wallet's last action
-                "debt_raw": r["currentTotalDebt"],                 # as of the wallet's last action
-                "collateral_enabled": bool(r["usageAsCollateralEnabledOnUser"]),
-                "emode_id": cat_id,
-                "emode_lt_bps": cat_lt if in_category else 0,
-                "scaled_atoken_raw": r["scaledATokenBalance"],
-                "scaled_vdebt_raw": r["scaledVariableDebt"],
-                "stable_debt_raw": r["currentStableDebt"],
-                "liq_index": res["liquidityIndex"],
-                "borrow_index": res["variableBorrowIndex"],
-                "liq_rate": res["liquidityRate"],
-                "borrow_rate": res["variableBorrowRate"],
-                "reserve_updated_ts": res["lastUpdateTimestamp"],
-            })
-    return pd.DataFrame(rows)
+    return fetch_raw_for_wallets(wallets)
 
 def add_accrued_balances(raw, now_ts=None):
     """Grow balances to now: scaled balance x reserve index, with the index extended from the
