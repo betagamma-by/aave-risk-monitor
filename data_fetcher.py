@@ -1,7 +1,9 @@
 import requests
 import pandas as pd
+import numpy as np
 import time 
 import os 
+SECONDS_PER_YEAR = 365 * 24 * 3600
 
 SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1756180/aave-v-3-risk-monitor/v0.0.2"
 
@@ -116,7 +118,8 @@ def rank_reserves_by_usd(top_n):
     return ranked.head(top_n)[["id", "symbol"]].to_dict("records")
 
 def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
-    """One row per wallet-reserve, raw values kept as the subgraph returns them."""
+    """One row per wallet-reserve. Keeps the subgraph's last-update balances AND the scaled
+    balances plus reserve indexes needed to grow them to today."""
     reserves = rank_reserves_by_usd(top_reserves)
 
     wallets = set()
@@ -132,11 +135,14 @@ def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
 
     wallets_filter = str(sorted(wallets)).replace("'", '"')
     users = _gql(
-        """{ users(first: 1000, where: { id_in: %s }){
+        """{ users(first: 1000, where: { id_in: %s }) {
             id
             eModeCategoryId { id liquidationThreshold assets { asset collateral } }
             reserves { currentATokenBalance currentTotalDebt usageAsCollateralEnabledOnUser
-                reserve { symbol decimals reserveLiquidationThreshold underlyingAsset } } } }"""
+                scaledATokenBalance scaledVariableDebt currentStableDebt
+                reserve { symbol decimals reserveLiquidationThreshold underlyingAsset
+                    liquidityIndex variableBorrowIndex liquidityRate variableBorrowRate
+                    lastUpdateTimestamp } } } }"""
         % wallets_filter
     )["users"]
 
@@ -155,15 +161,35 @@ def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
                 "underlying": res["underlyingAsset"].lower(),
                 "decimals": int(res["decimals"]),
                 "base_lt_bps": int(res["reserveLiquidationThreshold"]),
-                "atoken_balance_raw": r["currentATokenBalance"],  # strings: values can be huge
-                "debt_raw": r["currentTotalDebt"],
+                "atoken_balance_raw": r["currentATokenBalance"],   # as of the wallet's last action
+                "debt_raw": r["currentTotalDebt"],                 # as of the wallet's last action
                 "collateral_enabled": bool(r["usageAsCollateralEnabledOnUser"]),
                 "emode_id": cat_id,
-                "emode_lt_bps": cat_lt if in_category else 0,  # 0 = no eMode boost for this asset
+                "emode_lt_bps": cat_lt if in_category else 0,
+                "scaled_atoken_raw": r["scaledATokenBalance"],
+                "scaled_vdebt_raw": r["scaledVariableDebt"],
+                "stable_debt_raw": r["currentStableDebt"],
+                "liq_index": res["liquidityIndex"],
+                "borrow_index": res["variableBorrowIndex"],
+                "liq_rate": res["liquidityRate"],
+                "borrow_rate": res["variableBorrowRate"],
+                "reserve_updated_ts": res["lastUpdateTimestamp"],
             })
     return pd.DataFrame(rows)
 
-def compute_positions(raw, prices):
+def add_accrued_balances(raw, now_ts=None):
+    """Grow balances to now: scaled balance x reserve index, with the index extended from the
+    reserve's last update to now using its current rate (supply: linear, borrow: compounded)."""
+    now_ts = now_ts or time.time()
+    r = raw.copy()
+    dt = (now_ts - r["reserve_updated_ts"].astype(float)).clip(lower=0)
+    liq = r["liq_index"].astype(float) / 1e27 * (1 + r["liq_rate"].astype(float) / 1e27 * dt / SECONDS_PER_YEAR)
+    bor = r["borrow_index"].astype(float) / 1e27 * np.exp(r["borrow_rate"].astype(float) / 1e27 * dt / SECONDS_PER_YEAR)
+    r["atoken_now_raw"] = r["scaled_atoken_raw"].astype(float) * liq
+    r["debt_now_raw"] = r["scaled_vdebt_raw"].astype(float) * bor + r["stable_debt_raw"].astype(float)
+    return r
+
+def compute_positions(raw, prices, accrue=True):
     """prices: {lowercase underlying address: USD price}."""
     stats = {"wallets_fetched": 0, "wallets_in_emode": 0, "excluded_unpriced_collateral": 0,
              "excluded_unpriced_debt": 0, "dropped_debt_under_100": 0}
@@ -172,6 +198,12 @@ def compute_positions(raw, prices):
     stats["wallets_fetched"] = int(raw["wallet"].nunique())
     stats["wallets_in_emode"] = int((raw.groupby("wallet")["emode_id"].max() > 0).sum())
 
+    if accrue:
+        raw = add_accrued_balances(raw)
+        a_col, d_col = "atoken_now_raw", "debt_now_raw"
+    else:
+        a_col, d_col = "atoken_balance_raw", "debt_raw"
+    
     rows = []
     for wallet, g in raw.groupby("wallet"):
         collateral_usd = debt_usd = weighted = weighted_base = max_val = 0.0
@@ -179,8 +211,8 @@ def compute_positions(raw, prices):
 
         for r in g.itertuples():
             scale = 10 ** r.decimals
-            balance_tokens = float(r.atoken_balance_raw) / scale
-            debt_tokens = float(r.debt_raw) / scale
+            balance_tokens = float(getattr(r, a_col)) / scale
+            debt_tokens = float(getattr(r, d_col)) / scale
             price = prices.get(r.underlying, 0)
             if price == 0:
                 if r.collateral_enabled and balance_tokens > 0.01:
