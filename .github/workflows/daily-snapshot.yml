@@ -1,9 +1,16 @@
 
 name: Daily Aave Snapshot
 
+# on:
+#   schedule:
+#     # 09:17 Malaysia time (UTC+8), daily
+#     - cron: '17 1 * * *'
+#   workflow_dispatch:
 on:
+  push:
+    branches:
+      - phase2-fixes
   schedule:
-    # 09:17 Malaysia time (UTC+8), daily
     - cron: '17 1 * * *'
   workflow_dispatch:
 
