@@ -5,3 +5,12 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+
+# Local diagnostics
+f22_*.py
+f22_*.txt
+gho_check.py
+gho_token_diag.py
+
+# Local snapshots
+snapshots/

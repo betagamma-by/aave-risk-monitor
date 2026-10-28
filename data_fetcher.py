@@ -85,7 +85,6 @@ def fetch_aave_prices(addresses):
                 prices[a] = 0
     return {a: p / unit for a, p in prices.items() if p > 0}
 
-
 def build_prices(raw):
     """Aave oracle if the env vars are set, otherwise the old CoinGecko path."""
     addrs = set(raw["underlying"])
@@ -191,6 +190,78 @@ def add_accrued_balances(raw, now_ts=None):
     r["debt_now_raw"] = r["scaled_vdebt_raw"].astype(float) * bor + r["stable_debt_raw"].astype(float)
     return r
 
+def override_gho_debt(raw):
+    """Replace GHO debt with its actual on-chain debt-token balance."""
+    from web3 import Web3
+
+    gho_mask = raw["symbol"] == "GHO"
+    if not gho_mask.any():
+        return raw
+
+    w3 = Web3(Web3.HTTPProvider(
+        os.environ["ETH_RPC_URL"],
+        request_kwargs={"timeout": 20}
+    ))
+
+    def abi_fn(name, inputs, outputs):
+        return {
+            "name": name,
+            "type": "function",
+            "stateMutability": "view",
+            "inputs": [{"type": t} for t in inputs],
+            "outputs": [{"type": t} for t in outputs],
+        }
+
+    pool = w3.eth.contract(
+        address=Web3.to_checksum_address(os.environ["AAVE_POOL_ADDRESS"]),
+        abi=[abi_fn("ADDRESSES_PROVIDER", [], ["address"])]
+    )
+
+    provider_address = pool.functions.ADDRESSES_PROVIDER().call()
+    provider = w3.eth.contract(
+        address=provider_address,
+        abi=[abi_fn("getPoolDataProvider", [], ["address"])]
+    )
+
+    data_provider_address = provider.functions.getPoolDataProvider().call()
+    dp = w3.eth.contract(
+        address=data_provider_address,
+        abi=[abi_fn("getReserveTokensAddresses",
+                    ["address"], ["address", "address", "address"])]
+    )
+
+    gho_address = Web3.to_checksum_address(
+        raw.loc[gho_mask, "underlying"].iloc[0]
+    )
+
+    block = w3.eth.block_number
+
+    _, _, debt_token_address = dp.functions.getReserveTokensAddresses(
+        gho_address
+    ).call(block_identifier=block)
+
+    token = w3.eth.contract(
+        address=debt_token_address,
+        abi=[abi_fn("balanceOf", ["address"], ["uint256"])]
+    )
+
+    result = raw.copy()
+
+    for wallet in result.loc[gho_mask, "wallet"].unique():
+        debt = token.functions.balanceOf(
+            Web3.to_checksum_address(wallet)
+        ).call(block_identifier=block)
+
+        result.loc[
+            gho_mask & (result["wallet"] == wallet),
+            "debt_now_raw"
+        ] = float(debt)
+
+    print(f"GHO override: {result.loc[gho_mask, 'wallet'].nunique()} "
+          f"wallets, Ethereum block {block}")
+
+    return result
+
 def compute_positions(raw, prices, accrue=True):
     """prices: {lowercase underlying address: USD price}."""
     stats = {"wallets_fetched": 0, "wallets_in_emode": 0, "excluded_unpriced_collateral": 0,
@@ -202,6 +273,7 @@ def compute_positions(raw, prices, accrue=True):
 
     if accrue:
         raw = add_accrued_balances(raw)
+        raw = override_gho_debt(raw)
         a_col, d_col = "atoken_now_raw", "debt_now_raw"
     else:
         a_col, d_col = "atoken_balance_raw", "debt_raw"
@@ -262,15 +334,33 @@ def compute_positions(raw, prices, accrue=True):
     df = pd.DataFrame(rows)
     return (df.sort_values("health_factor") if not df.empty else df), stats
 
-def fetch_high_risk_positions(top_reserves=5, borrowers_per_reserve=15):
+def fetch_high_risk_positions(
+    top_reserves=5,
+    borrowers_per_reserve=15,
+    return_stats=False
+):
     raw = fetch_raw_positions(top_reserves, borrowers_per_reserve)
+
     if raw.empty:
-        return pd.DataFrame()
+        empty_stats = {
+            "wallets_fetched": 0,
+            "wallets_in_emode": 0,
+            "excluded_unpriced_collateral": 0,
+            "excluded_unpriced_debt": 0,
+            "dropped_debt_under_100": 0,
+            "price_source": "unknown",
+        }
+        return (pd.DataFrame(), empty_stats) if return_stats else pd.DataFrame()
+
     prices, source = build_prices(raw)
-    unpriced = sorted(set(raw.loc[~raw["underlying"].isin(prices), "symbol"]))
+    unpriced = sorted(set(
+        raw.loc[~raw["underlying"].isin(prices), "symbol"]
+    ))
     if unpriced:
-        print(f"⚠️ No price for: {unpriced}")
+        print(f"Warning: No price for: {unpriced}")
+
     df, stats = compute_positions(raw, prices)
     stats["price_source"] = source
     print("STATS:", stats)
-    return df
+
+    return (df, stats) if return_stats else df
