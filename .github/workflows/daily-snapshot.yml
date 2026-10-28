@@ -1,0 +1,129 @@
+
+name: Daily Aave Snapshot
+
+on:
+  schedule:
+    # 09:17 Malaysia time (UTC+8), daily
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aave-daily-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout validated monitor code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pyarrow
+
+      - name: Build and validate snapshot
+        env:
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+          AAVE_POOL_ADDRESS: ${{ secrets.AAVE_POOL_ADDRESS }}
+          AAVE_ORACLE_ADDRESS: ${{ secrets.AAVE_ORACLE_ADDRESS }}
+        run: python f11_snapshot.py
+
+      - name: Publish valid snapshot to data branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          DATA_DIR="$RUNNER_TEMP/aave-snapshot-data"
+
+          if git ls-remote --exit-code --heads origin data >/dev/null; then
+            git fetch origin data
+            git worktree add -B data "$DATA_DIR" origin/data
+          else
+            git worktree add --detach "$DATA_DIR"
+            git -C "$DATA_DIR" checkout --orphan data
+            git -C "$DATA_DIR" rm -r -f . || true
+            git -C "$DATA_DIR" clean -fdx
+          fi
+
+          mkdir -p "$DATA_DIR/snapshots"
+          cp -R snapshots/* "$DATA_DIR/snapshots/"
+
+          DATA_DIR="$DATA_DIR" python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          import json
+          import os
+          import shutil
+
+          root = Path(os.environ["DATA_DIR"]) / "snapshots"
+          cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+          valid = []
+
+          for folder in root.iterdir():
+              if not folder.is_dir() or folder.name.startswith("."):
+                  continue
+
+              try:
+                  meta = json.loads((folder / "metadata.json").read_text())
+                  date = datetime.fromisoformat(
+                      meta["completed_utc"].replace("Z", "+00:00")
+                  )
+
+                  required = (
+                      "raw_positions.parquet",
+                      "computed_positions.parquet",
+                      "prices.json",
+                      "metadata.json",
+                  )
+
+                  if not all((folder / name).exists() for name in required):
+                      raise ValueError("Incomplete snapshot")
+
+                  valid.append((date, folder))
+
+              except (OSError, ValueError, KeyError):
+                  continue
+
+          if not valid:
+              raise RuntimeError("No valid snapshots available")
+
+          latest = max(valid, key=lambda item: item[0])[1]
+
+          for date, folder in valid:
+              if date < cutoff and folder != latest:
+                  shutil.rmtree(folder)
+
+          data_dir = Path(os.environ["DATA_DIR"])
+          (data_dir / "latest.json").write_text(
+              json.dumps({"snapshot": latest.name}, indent=2) + "\n"
+          )
+
+          print("Latest valid snapshot:", latest.name)
+          PY
+
+          git -C "$DATA_DIR" add -A
+
+          if git -C "$DATA_DIR" diff --cached --quiet; then
+            echo "No snapshot changes to publish"
+          else
+            git -C "$DATA_DIR" commit -m "Update daily Aave snapshot"
+            git -C "$DATA_DIR" push origin HEAD:data
+          fi
