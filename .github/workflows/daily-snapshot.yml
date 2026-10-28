@@ -4,14 +4,14 @@ name: Daily Aave Snapshot
 # on:
 #   schedule:
 #     # 09:17 Malaysia time (UTC+8), daily
-#     - cron: '17 1 * * *'
+#     - cron: '0 16 * * *'
 #   workflow_dispatch:
 on:
   push:
     branches:
       - phase2-fixes
   schedule:
-    - cron: '17 1 * * *'
+    - cron: '0 16 * * *'
   workflow_dispatch:
 
 permissions:
