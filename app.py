@@ -187,8 +187,23 @@ total_debt_at_risk = positions_df["debt_usd"].sum()
 col1.metric("Positions Monitored", len(positions_df))
 col2.metric(
     "Critical Risk (HF < 1.05)",
-    len(critical),
-    border=True
+    len(critical)
+)
+col2.markdown(
+    f"""
+    <div style="
+        background-color: rgba(255, 75, 75, 0.12);
+        color: #FF4B4B;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 600;
+        margin-top: 4px;
+    ">
+        ${critical['debt_usd'].sum():,.0f} Combined Outstanding Debt
+    </div>
+    """,
+    unsafe_allow_html=True
 )
 col2.caption(
     f"Combined Outstanding Debt: ${critical['debt_usd'].sum():,.0f}"
