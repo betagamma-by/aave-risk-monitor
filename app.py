@@ -188,8 +188,10 @@ col1.metric("Positions Monitored", len(positions_df))
 col2.metric(
     "Critical Risk (HF < 1.05)",
     len(critical),
-    delta=f"${critical['debt_usd'].sum():,.0f} debt at risk",
-    delta_color="inverse"
+    border=True
+)
+col2.caption(
+    f"Combined Outstanding Debt: ${critical['debt_usd'].sum():,.0f}"
 )
 col3.metric("High Risk (HF 1.05–1.2)", len(high))
 col4.metric("Total Debt Monitored", f"${total_debt_at_risk:,.0f}")
