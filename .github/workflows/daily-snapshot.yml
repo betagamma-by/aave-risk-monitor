@@ -1,16 +1,9 @@
 
 name: Daily Aave Snapshot
 
-# on:
-#   schedule:
-#     # 09:17 Malaysia time (UTC+8), daily
-#     - cron: '0 16 * * *'
-#   workflow_dispatch:
 on:
-  push:
-    branches:
-      - phase2-fixes
   schedule:
+    # Midnight Malaysia time (UTC+8)
     - cron: '0 16 * * *'
   workflow_dispatch:
 
@@ -28,12 +21,12 @@ jobs:
 
     steps:
       - name: Checkout validated monitor code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
