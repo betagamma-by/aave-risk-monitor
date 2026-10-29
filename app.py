@@ -205,9 +205,6 @@ col2.markdown(
     """,
     unsafe_allow_html=True
 )
-col2.caption(
-    f"Combined Outstanding Debt: ${critical['debt_usd'].sum():,.0f}"
-)
 col3.metric("High Risk (HF 1.05–1.2)", len(high))
 col4.metric("Total Debt Monitored", f"${total_debt_at_risk:,.0f}")
 
