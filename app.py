@@ -6,6 +6,7 @@ import data_fetcher as d
 from web3 import Web3
 from data_fetcher import fetch_high_risk_positions
 from datetime import datetime, timezone
+from f11_fallback import load_github_snapshot
 
 st.set_page_config(
     page_title="Aave V3 Liquidation Risk Monitor",
@@ -52,16 +53,57 @@ def load_positions(top_reserves, borrowers_per_reserve):
 
     return positions, stats, fetched_at, freshness
 
-with st.spinner("Fetching Aave positions..."):
+
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+def load_positions_with_fallback(top_reserves, borrowers_per_reserve):
     try:
-        positions_df, coverage_stats, fetched_at, freshness = load_positions(8, 60)
+        positions, stats, fetched_at, freshness = load_positions(
+            top_reserves, borrowers_per_reserve
+        )
+        return positions, stats, fetched_at, freshness, "live"
+    except Exception as live_error:
+        try:
+            positions, stats, captured_at, metadata = load_github_snapshot()
+            stats = stats.copy()
+            stats["price_source"] = metadata["price_source"]
+            freshness = {
+                "chain_block": metadata.get("chain_block"),
+                "graph_block": metadata.get("graph_block"),
+                "lag_blocks": metadata.get("lag_blocks"),
+                "indexing_errors": metadata.get("indexing_errors"),
+            }
+            return positions, stats, captured_at, freshness, "snapshot"
+        except Exception:
+            raise RuntimeError(
+                "Both live Aave data and GitHub snapshot recovery failed"
+            ) from None
+
+
+with st.spinner("Loading Aave positions..."):
+    try:
+        (
+            positions_df,
+            coverage_stats,
+            fetched_at,
+            freshness,
+            data_source,
+        ) = load_positions_with_fallback(8, 60)
     except Exception as e:
         st.error(
-            "Unable to retrieve Aave position data. "
-            "The subgraph, RPC provider, or price source may be unavailable."
+            "Unable to load Aave data from either the live sources "
+            "or the GitHub recovery snapshot."
         )
         st.caption(f"Error type: {type(e).__name__}")
         st.stop()
+
+if data_source == "snapshot":
+    st.warning(
+        "⚠️ HISTORICAL SNAPSHOT — Live Aave data is unavailable. "
+        f"Showing the last valid snapshot captured at "
+        f"{fetched_at:%Y-%m-%d %H:%M:%S} UTC. "
+        "These positions and health factors may no longer reflect "
+        "current liquidation risk."
+    )
 
 if positions_df.empty:
     st.warning(
@@ -72,22 +114,30 @@ if positions_df.empty:
 
 # ── Data quality and coverage ───────────────────────────────
 st.divider()
-st.write(f"Ethereum head block: {freshness['chain_block']:,}")
-st.write(f"Subgraph indexed block: {freshness['graph_block']:,}")
-st.write(f"Indexing lag: {freshness['lag_blocks']} blocks")
+if data_source == "live":
+    st.write(f"Ethereum head block: {freshness['chain_block']:,}")
+    st.write(f"Subgraph indexed block: {freshness['graph_block']:,}")
+    st.write(f"Indexing lag: {freshness['lag_blocks']} blocks")
 
-if freshness["indexing_errors"]:
-    st.error("Subgraph reports indexing errors.")
-elif freshness["lag_blocks"] > 20:
-    st.warning("Subgraph may be significantly behind Ethereum.")
+    if freshness["indexing_errors"]:
+        st.error("Subgraph reports indexing errors.")
+    elif freshness["lag_blocks"] > 20:
+        st.warning("Subgraph may be significantly behind Ethereum.")
+else:
+    st.caption(
+        "Blockchain freshness metrics are unavailable in "
+        "historical recovery mode."
+    )
 
 st.caption(
-    f"Data fetched: {fetched_at:%Y-%m-%d %H:%M:%S} UTC "
+    f"{'Data fetched' if data_source == 'live' else 'Snapshot captured'}: "
+    f"{fetched_at:%Y-%m-%d %H:%M:%S} UTC "
     "| Cache TTL: 5 minutes"
 )
 
 if st.button("Refresh data"):
     load_positions.clear()
+    load_positions_with_fallback.clear()
     st.rerun()
 
 fetched = coverage_stats["wallets_fetched"]
