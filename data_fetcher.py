@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import time 
 import os 
+from decimal import Decimal, localcontext
 SECONDS_PER_YEAR = 365 * 24 * 3600
 
 SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1756180/aave-v-3-risk-monitor/v0.0.2"
@@ -264,6 +265,16 @@ def override_gho_debt(raw):
 
 def compute_positions(raw, prices, accrue=True):
     """prices: {lowercase underlying address: USD price}."""
+    if not raw.empty:
+        duplicates = raw.duplicated(
+            subset=["wallet", "underlying"],
+            keep=False
+        )
+        if duplicates.any():
+            raise ValueError(
+                "Duplicate wallet-reserve rows detected: "
+                f"{int(duplicates.sum())} conflicting rows"
+            )
     stats = {"wallets_fetched": 0, "wallets_in_emode": 0, "excluded_unpriced_collateral": 0,
              "excluded_unpriced_debt": 0, "dropped_debt_under_100": 0}
     if raw.empty:
@@ -278,58 +289,98 @@ def compute_positions(raw, prices, accrue=True):
     else:
         a_col, d_col = "atoken_balance_raw", "debt_raw"
     
+
     rows = []
-    for wallet, g in raw.groupby("wallet"):
-        collateral_usd = debt_usd = weighted = weighted_base = max_val = 0.0
-        primary, unpriced_collateral, unpriced_debt = None, False, False
 
-        for r in g.itertuples():
-            scale = 10 ** r.decimals
-            balance_tokens = float(getattr(r, a_col)) / scale
-            debt_tokens = float(getattr(r, d_col)) / scale
-            price = prices.get(r.underlying, 0)
-            if price == 0:
-                if r.collateral_enabled and balance_tokens > 0.01:
-                    unpriced_collateral = True
-                if debt_tokens > 0.01:          # ignore dust
-                    unpriced_debt = True
+    def dec(value):
+        # Preserve exact integer and decimal-string inputs.
+        # For float inputs, use their shortest decimal representation.
+        return Decimal(str(value))
+
+    with localcontext() as ctx:
+        ctx.prec = 50
+
+        for wallet, g in raw.groupby("wallet"):
+            collateral_usd = Decimal(0)
+            debt_usd = Decimal(0)
+            weighted = Decimal(0)
+            weighted_base = Decimal(0)
+            max_val = Decimal(0)
+
+            primary = None
+            unpriced_collateral = False
+            unpriced_debt = False
+
+            for r in g.itertuples():
+                scale = Decimal(10) ** int(r.decimals)
+
+                balance_tokens = dec(getattr(r, a_col)) / scale
+                debt_tokens = dec(getattr(r, d_col)) / scale
+
+                price = dec(prices.get(r.underlying, 0))
+
+                if price == 0:
+                    if r.collateral_enabled and balance_tokens > Decimal("0.01"):
+                        unpriced_collateral = True
+                    if debt_tokens > Decimal("0.01"):
+                        unpriced_debt = True
+                    continue
+
+                if r.collateral_enabled:
+                    val = balance_tokens * price
+                    collateral_usd += val
+
+                    weighted_base += (
+                        val * dec(r.base_lt_bps) / Decimal(10000)
+                    )
+
+                    weighted += (
+                        val * dec(r.emode_lt_bps or r.base_lt_bps)
+                        / Decimal(10000)
+                    )
+
+                    if val > max_val:
+                        max_val = val
+                        primary = r.symbol
+
+                debt_usd += debt_tokens * price
+
+            if unpriced_collateral:
+                stats["excluded_unpriced_collateral"] += 1
                 continue
-            if r.collateral_enabled:
-                val = balance_tokens * price
-                collateral_usd += val
-                weighted_base += val * r.base_lt_bps / 10000
-                weighted += val * (r.emode_lt_bps or r.base_lt_bps) / 10000
-                if val > max_val:
-                    max_val, primary = val, r.symbol
-            debt_usd += debt_tokens * price
 
-        if unpriced_collateral:
-            stats["excluded_unpriced_collateral"] += 1
-            continue
-        if unpriced_debt:
-            stats["excluded_unpriced_debt"] += 1
-            continue
-        if debt_usd < 100:
-            stats["dropped_debt_under_100"] += 1
-            continue
+            if unpriced_debt:
+                stats["excluded_unpriced_debt"] += 1
+                continue
 
-        hf = weighted / debt_usd
-        rows.append({
-            "wallet": wallet[:10] + "...",
-            "wallet_full": wallet,
-            "collateral_usd": round(collateral_usd, 2),
-            "debt_usd": round(debt_usd, 2),
-            "health_factor": round(hf, 4),
-            "health_factor_base": round(weighted_base / debt_usd, 4),
-            "emode_id": int(g["emode_id"].iloc[0]),
-            "primary_collateral": primary or "Unknown",
-            "risk_tier": (
-                "CRITICAL (HF < 1.05)" if hf < 1.05
-                else "HIGH (HF 1.05–1.2)" if hf < 1.2
-                else "ELEVATED (HF 1.2–1.5)" if hf < 1.5
-                else "SAFE"
-            ),
-        })
+            if debt_usd < Decimal(100):
+                stats["dropped_debt_under_100"] += 1
+                continue
+
+            hf = weighted / debt_usd
+            hf_base = weighted_base / debt_usd
+
+            if hf < Decimal("1.05"):
+                risk_tier = "CRITICAL (HF < 1.05)"
+            elif hf < Decimal("1.2"):
+                risk_tier = "HIGH (HF 1.05–1.2)"
+            elif hf < Decimal("1.5"):
+                risk_tier = "ELEVATED (HF 1.2–1.5)"
+            else:
+                risk_tier = "SAFE"
+
+            rows.append({
+                "wallet": wallet[:10] + "...",
+                "wallet_full": wallet,
+                "collateral_usd": round(float(collateral_usd), 2),
+                "debt_usd": round(float(debt_usd), 2),
+                "health_factor": float(hf),
+                "health_factor_display": round(float(hf), 6),
+                "health_factor_base": float(hf_base),
+                "emode_id": int(g["emode_id"].iloc[0]),
+                "primary_collateral": primary or "Unknown",
+                "risk_tier": risk_tier,
+            })
 
     df = pd.DataFrame(rows)
     return (df.sort_values("health_factor") if not df.empty else df), stats
