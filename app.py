@@ -180,8 +180,13 @@ with st.expander("Data Quality & Coverage", expanded=False):
 # ── KPI Row ──────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)
 
-critical = positions_df[positions_df["health_factor"] < 1.05]
-high = positions_df[(positions_df["health_factor"] >= 1.05) & (positions_df["health_factor"] < 1.2)]
+critical = positions_df[
+    positions_df["risk_tier"] == "CRITICAL (HF < 1.05)"
+]
+
+high = positions_df[
+    positions_df["risk_tier"] == "HIGH (HF 1.05–1.2)"
+]
 total_debt_at_risk = positions_df["debt_usd"].sum()
 
 col1.metric("Positions Monitored", len(positions_df))
@@ -301,9 +306,29 @@ st.dataframe(scenarios, width="stretch", hide_index=True)
 # ── Section 4: Top At-Risk Positions ─────────────────────────
 st.subheader("Top Monitored Positions by Debt")
 top20 = positions_df.nlargest(20, "debt_usd")[
-    ["wallet", "health_factor", "collateral_usd", "debt_usd", "primary_collateral", "risk_tier"]
-]
-st.dataframe(top20, width="stretch", hide_index=True)
+    [
+        "wallet",
+        "health_factor_display",
+        "collateral_usd",
+        "debt_usd",
+        "primary_collateral",
+        "risk_tier",
+    ]
+].rename(columns={
+    "health_factor_display": "Health Factor"
+})
+
+st.dataframe(
+    top20,
+    width="stretch",
+    hide_index=True,
+    column_config={
+        "Health Factor": st.column_config.NumberColumn(
+            "Health Factor",
+            format="%.6f"
+        )
+    }
+)
 
 st.divider()
 st.caption(
