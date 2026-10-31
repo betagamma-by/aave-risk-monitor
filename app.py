@@ -6,6 +6,7 @@ import data_fetcher as d
 from web3 import Web3
 from data_fetcher import fetch_high_risk_positions
 from datetime import datetime, timezone
+from recovery import load_with_fallback
 from f11_fallback import load_github_snapshot
 
 st.set_page_config(
@@ -53,31 +54,14 @@ def load_positions(top_reserves, borrowers_per_reserve):
 
     return positions, stats, fetched_at, freshness
 
-
 @st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_positions_with_fallback(top_reserves, borrowers_per_reserve):
-    try:
-        positions, stats, fetched_at, freshness = load_positions(
-            top_reserves, borrowers_per_reserve
-        )
-        return positions, stats, fetched_at, freshness, "live"
-    except Exception as live_error:
-        try:
-            positions, stats, captured_at, metadata = load_github_snapshot()
-            stats = stats.copy()
-            stats["price_source"] = metadata["price_source"]
-            freshness = {
-                "chain_block": metadata.get("chain_block"),
-                "graph_block": metadata.get("graph_block"),
-                "lag_blocks": metadata.get("lag_blocks"),
-                "indexing_errors": metadata.get("indexing_errors"),
-            }
-            return positions, stats, captured_at, freshness, "snapshot"
-        except Exception:
-            raise RuntimeError(
-                "Both live Aave data and GitHub snapshot recovery failed"
-            ) from None
-
+    return load_with_fallback(
+        load_positions,
+        load_github_snapshot,
+        top_reserves,
+        borrowers_per_reserve,
+    )
 
 with st.spinner("Loading Aave positions..."):
     try:
