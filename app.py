@@ -150,6 +150,13 @@ dropped_small = coverage_stats["dropped_debt_under_100"]
 excluded = excluded_collateral + excluded_debt
 total_omitted = excluded + dropped_small
 
+st.info(
+    "Coverage: This dashboard monitors a sampled subset of Aave V3 "
+    "Ethereum borrowers, not all active borrowers. "
+    "Positions excluded because of missing prices or the minimum "
+    "debt threshold are not represented in the risk statistics."
+)
+
 with st.expander("Data Quality & Coverage", expanded=False):
     c1, c2, c3 = st.columns(3)
     c1.metric("Wallets fetched", fetched)
@@ -180,6 +187,15 @@ with st.expander("Data Quality & Coverage", expanded=False):
 # ── KPI Row ──────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)
 
+liquidatable = positions_df[
+    positions_df["health_factor"] < 1.0
+]
+
+near_liquidation = positions_df[
+    (positions_df["health_factor"] >= 1.0)
+    & (positions_df["health_factor"] < 1.05)
+]
+
 critical = positions_df[
     positions_df["risk_tier"] == "CRITICAL (HF < 1.05)"
 ]
@@ -187,7 +203,7 @@ critical = positions_df[
 high = positions_df[
     positions_df["risk_tier"] == "HIGH (HF 1.05–1.2)"
 ]
-total_debt_at_risk = positions_df["debt_usd"].sum()
+total_debt_monitored = positions_df["debt_usd"].sum()
 
 col1.metric("Positions Monitored", len(positions_df))
 col2.metric(
@@ -211,8 +227,15 @@ col2.markdown(
     unsafe_allow_html=True
 )
 col3.metric("High Risk (HF 1.05–1.2)", len(high))
-col4.metric("Total Debt Monitored", f"${total_debt_at_risk:,.0f}")
-
+col4.metric("Total Debt Monitored", f"${total_debt_monitored:,.0f}")
+if len(liquidatable) + len(near_liquidation) != len(critical):
+    st.error("Liquidation risk classification mismatch detected.")
+st.caption(
+    f"Critical positions: {len(liquidatable):,} currently "
+    f"liquidatable (HF < 1.0) + "
+    f"{len(near_liquidation):,} near liquidation "
+    f"(1.0 ≤ HF < 1.05) = {len(critical):,} total."
+)
 st.divider()
 
 # ── Section 1: Risk Distribution ─────────────────────────────
@@ -280,8 +303,15 @@ fig_collateral = px.bar(
 st.plotly_chart(fig_collateral, width="stretch")
 
 # ── Section 3: Liquidation Cascade Simulation ─────────────────
-st.subheader("Liquidation Cascade Scenarios")
-st.caption("Estimated impact if collateral prices drop, based on currently monitored positions.")
+st.subheader("Simplified Collateral Price Stress Test")
+
+st.caption(
+    "Hypothetical scenarios assuming all collateral assets decline "
+    "by the same percentage, debt values remain unchanged, and "
+    "liquidation thresholds remain constant. "
+    "Results represent potential liquidation eligibility, "
+    "not predicted liquidations or realized losses."
+)
 
 total_collateral = positions_df["collateral_usd"].sum()
 
@@ -298,8 +328,11 @@ for drop_pct in [0.10, 0.20, 0.30, 0.40, 0.50]:
     liquidated_counts.append(len(at_risk_positions))
     collateral_at_risk.append(at_risk_positions["collateral_usd"].sum())
 
-scenarios["Positions Pushed Into Liquidation"] = liquidated_counts
-scenarios["Est. Collateral at Risk (USD)"] = [f"${v:,.0f}" for v in collateral_at_risk]
+scenarios["Positions with Simulated HF < 1.0"] = liquidated_counts
+
+scenarios["Collateral Held by These Positions (USD)"] = [
+    f"${v:,.0f}" for v in collateral_at_risk
+]
 
 st.dataframe(scenarios, width="stretch", hide_index=True)
 
@@ -332,7 +365,11 @@ st.dataframe(
 
 st.divider()
 st.caption(
-    "Built by Bao Ying | Data: self-deployed Aave V3 subgraph (The Graph Studio) + CoinGecko live prices | "
+    "Built by Bao Ying | "
+    "Data: Aave V3 Ethereum Mainnet via The Graph Studio "
+    "and Aave Oracle prices | "
     "github.com/betagamma-by | "
-    "Note: positions collateralized by Pendle PT-tokens or a small number of unpriced assets are excluded — see README."
+    "Coverage: sampled monitored borrowers; "
+    "positions with required assets lacking valid prices are excluded. "
+    "See README for methodology and limitations."
 )

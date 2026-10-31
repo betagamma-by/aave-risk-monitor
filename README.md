@@ -22,49 +22,88 @@ concentration, and cascade scenarios in an interactive dashboard.
 
 - **Part A (Dune):** historical liquidation volume, collateral exposure,
   borrower growth trends, and cascade stress scenarios — all via SQL.
-- **Part B (Streamlit):** live health-factor monitoring for active Aave V3
-  borrowers, computed from raw on-chain balances + live market prices.
+- **Part B (Streamlit):** Health Factor monitoring for a sampled
+  population of Aave V3 Ethereum Mainnet borrowers, calculated using
+  borrower collateral and debt data, Aave Oracle asset prices,
+  and applicable liquidation thresholds.
+
+  The dashboard supports live data retrieval and validated
+  historical snapshot fallback.
 
 ## How It Works
 
-1. A custom subgraph (deployed from Aave's own open-source subgraph code)
-   indexes Aave V3's contract events on Ethereum mainnet.
-2. For each of the top 5 most-borrowed markets, the pipeline finds the
-   largest active borrowers (`userReserves` sorted by debt, within a
-   single asset at a time — see Known Limitations for why this matters).
-3. For each wallet, all of their collateral and debt positions are pulled
-   and converted from raw on-chain integers into real-world units.
-4. Live USD prices are fetched from CoinGecko (the subgraph's own price
-   field turned out to be unreliable for many assets — see below).
-5. Health factor is computed per wallet using Aave's own formula:
-   `(collateral × liquidation threshold) / debt`.
-6. Streamlit displays risk tiers, distributions, and cascade scenarios.
+1. The Aave V3 Ethereum Mainnet subgraph on The Graph Studio
+   provides borrower and reserve data.
+
+2. The pipeline ranks reserves by USD debt and samples borrowers
+   from the top 8 reserves, targeting up to 60 borrowers per reserve.
+   Wallets appearing in multiple reserves are deduplicated.
+
+3. For each sampled wallet, the pipeline retrieves collateral and
+   debt positions, accounting for reserve indexes and supported
+   on-chain debt adjustments.
+
+4. Asset prices are obtained from the Aave Oracle.
+
+5. Health Factor is calculated using collateral values, each
+   asset's applicable liquidation threshold, and total debt.
+   Financial calculations use Python Decimal arithmetic.
+
+6. Streamlit displays risk classifications, debt exposure,
+   collateral concentrations, and simplified stress scenarios.
+
+7. GitHub Actions creates daily snapshots. When live fetching
+   fails, Streamlit can recover from a validated historical
+   snapshot and displays a historical-data warning.
 
 ## Data Quality & Known Limitations
 
 This section is here deliberately — understanding where data breaks down
 is part of the analysis, not something to hide.
 
-- **Pendle PT-token collateral is excluded.** Wallets using Pendle
-  Principal Tokens (e.g. `PT-sUSDe-27NOV2025`) as collateral are excluded
-  from risk calculations, because each PT token trades at a maturity-
-  specific discount that requires Pendle's own pricing API — out of
-  scope for this project. These wallets are flagged and dropped rather
-  than shown with incorrect (zero) collateral values.
-- **A small number of newer/exotic assets have no price source.**
-  A handful of tokens (e.g. `mUSD`, `USDG`, `eBTC`) aren't covered by
-  the CoinGecko mapping used here and are excluded from collateral/debt
-  totals for any wallet holding them.
-- **The subgraph's native `priceInEth` field is not reliable.** Despite
-  the name, it stores a USD price scaled by 1e8 for major assets, but
-  returns `0` for several newer assets (e.g. GHO, USDe, RLUSD) — likely
-  because their oracle isn't a standard Chainlink feed. Live CoinGecko
-  prices are used instead for accuracy and full coverage.
-- **Ranking by "top borrowers" is done per-asset, not globally.** Raw
-  on-chain debt amounts aren't comparable across assets with different
-  decimal precision (e.g. USDC uses 6 decimals, WETH uses 18) — so
-  candidate wallets are identified by sorting within one reserve at a
-  time, where the comparison is valid.
+- **Sampled coverage, not protocol-wide coverage.**
+  The dashboard monitors selected borrowers from the largest
+  debt markets. It must not be interpreted as covering every
+  Aave V3 borrower.
+
+- **Missing prices cause wallet exclusion.**
+  If an asset required to value a wallet's collateral or debt
+  lacks a valid price, that wallet is excluded from risk
+  calculations rather than assigned an incorrect zero value.
+  This can affect Pendle PT-token positions and other assets
+  without supported oracle prices.
+
+- **Asset pricing.**
+  USD collateral and debt valuations use prices obtained
+  from the Aave V3 Oracle on Ethereum Mainnet.
+
+  Wallets requiring unavailable or invalid prices are
+  excluded from risk calculations.
+
+- **Snapshots are not perfectly block-consistent.**
+  Subgraph and Ethereum RPC reads may occur at different
+  blocks. Saved snapshots include relevant capture metadata,
+  but should not be treated as an atomic on-chain state.
+
+- **Historical fallback is not live monitoring.**
+  When live fetching fails, the dashboard can display a
+  previously validated snapshot. Historical data must not
+  be interpreted as current liquidation eligibility.
+
+- **Stress tests are simplified estimates.**
+  The current scenarios assume uniform collateral price
+  declines with unchanged debt values and liquidation
+  thresholds. Results indicate hypothetical liquidation
+  eligibility, not actual liquidations or financial losses.
+
+- **Borrower selection is performed per reserve, not globally.**
+  The pipeline selects borrowers from individual Aave V3
+  reserves, rather than ranking all borrowers by their
+  total USD debt across the entire protocol.
+
+  This means the monitored population is a sample of
+  borrowers from selected markets, not a complete
+  protocol-wide ranking.
 
 ## Note on Live Data Availability
 
@@ -88,7 +127,10 @@ SLUG=aave-v-3-risk-monitor npm run subgraph:deploy
 - Python 3.11
 - Streamlit
 - The Graph (self-deployed Aave V3 subgraph, Graph Studio)
-- CoinGecko API (live pricing)
+- Aave Oracle (on-chain asset pricing)
+- Ethereum RPC (on-chain reserve and debt data)
+- GitHub Actions (daily snapshots and automated testing)
+- Parquet (validated historical snapshots)
 - Plotly
 
 ## Author
