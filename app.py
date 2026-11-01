@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import os
 import data_fetcher as d
+from scenario_presets import PRESETS
 from web3 import Web3
 from data_fetcher import fetch_high_risk_positions
 from datetime import datetime, timezone
@@ -454,6 +455,139 @@ else:
                 "This scenario could not be compared consistently: "
                 f"{exc}"
             )
+
+        st.divider()
+        st.subheader("Multi-Asset Stress Scenario")
+
+        st.caption(
+            "Simulate several asset price changes together. "
+            "Scenario presets are illustrative assumptions, not forecasts."
+        )
+
+        scenario = st.selectbox(
+            "Scenario",
+            [
+                "ETH Market Crash",
+                "Stablecoin Depeg",
+                "Staking Token Divergence",
+                "Custom",
+            ],
+            key="multi_scenario",
+        )
+
+        # Build asset selection from actual monitored reserves.
+        asset_options = {
+            f"{r.symbol} ({r.underlying[:10]}...)": r.underlying
+            for r in assets.itertuples()
+        }
+
+        if scenario == "Custom":
+            selected_assets = st.multiselect(
+                "Assets to change",
+                options=list(asset_options),
+                default=[],
+            )
+
+            changes = {}
+            for label in selected_assets:
+                pct = st.slider(
+                    f"{label} price change (%)",
+                    min_value=-80,
+                    max_value=100,
+                    value=-20,
+                    step=5,
+                    key=f"custom_{asset_options[label]}",
+                )
+                if pct != 0:
+                    changes[asset_options[label]] = pct / 100
+
+        else:
+            changes = {}
+            missing_assets = []
+
+            for symbol, pct in PRESETS[scenario].items():
+                matching = assets[assets["symbol"] == symbol]
+
+                if matching.empty:
+                    missing_assets.append(symbol)
+                    continue
+
+                for address in matching["underlying"]:
+                    changes[address] = pct / 100
+
+            if missing_assets:
+                st.error(
+                    "INCOMPLETE SCENARIO — Missing priced assets: "
+                    + ", ".join(missing_assets)
+                    + ". Results do not represent the full preset."
+                )
+
+        if changes:
+            st.markdown("#### Assets With Simulated Price Changes")
+
+            st.caption(
+                "These are token contract addresses, NOT borrower wallet addresses. "
+                "Each price change applies to that token across all monitored wallets. "
+                "Percentages are hypothetical assumptions, not market forecasts."
+            )
+
+            asset_names = dict(zip(assets["underlying"], assets["symbol"]))
+
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Token": asset_names.get(address, "Unknown"),
+                        "Token Contract Address": address,
+                        "Current Oracle Price (USD)": prices[address],
+                        "Simulated Price Change (%)": round(change * 100, 2),
+                        "Simulated Price (USD)": prices[address] * (1 + change),
+                    }
+                    for address, change in changes.items()
+                ]),
+                width="stretch",
+                hide_index=True,
+            )
+
+            try:
+                multi_result = simulate_price_shock(
+                    prepared,
+                    prices,
+                    changes,
+                )
+
+                newly_multi = multi_result[
+                    multi_result["newly_liquidatable"]
+                ]
+
+                affected_multi = multi_result[
+                    multi_result["affected_by_shock"]
+                ]
+
+                m1, m2, m3 = st.columns(3)
+
+                m1.metric("Affected Wallets", len(affected_multi))
+                m2.metric("Newly Liquidatable", len(newly_multi))
+                m3.metric(
+                    "Debt of Newly Liquidatable Wallets",
+                    f"${newly_multi['stressed_debt_usd'].sum():,.0f}",
+                )
+
+                st.caption(
+                    "Showing the 20 lowest simulated Health Factors "
+                    "across sampled wallets. Unaffected wallets may appear. "
+                    "Outstanding debt is not an estimate of liquidation losses."
+                )
+
+                st.dataframe(
+                    multi_result.sort_values("stressed_hf").head(20),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            except ValueError as exc:
+                st.warning(f"Scenario unavailable: {exc}")
+        else:
+            st.info("Select at least one available asset with a nonzero shock.")
 
 # ── Section 4: Top At-Risk Positions ─────────────────────────
 st.subheader("Top Monitored Positions by Debt")
