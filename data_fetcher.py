@@ -263,7 +263,22 @@ def override_gho_debt(raw):
 
     return result
 
-def compute_positions(raw, prices, accrue=True):
+def prepare_balances(raw, now_ts=None):
+    """Apply interest accrual and GHO correction once."""
+    prepared = add_accrued_balances(raw, now_ts=now_ts)
+    prepared = override_gho_debt(prepared)
+
+    prepared["atoken_balance_raw"] = prepared["atoken_now_raw"]
+    prepared["debt_raw"] = prepared["debt_now_raw"]
+
+    return prepared
+
+def compute_positions(
+    raw,
+    prices,
+    accrue=True,
+    min_debt_usd=100,
+):
     """prices: {lowercase underlying address: USD price}."""
     if not raw.empty:
         duplicates = raw.duplicated(
@@ -289,7 +304,6 @@ def compute_positions(raw, prices, accrue=True):
     else:
         a_col, d_col = "atoken_balance_raw", "debt_raw"
     
-
     rows = []
 
     def dec(value):
@@ -353,7 +367,7 @@ def compute_positions(raw, prices, accrue=True):
                 stats["excluded_unpriced_debt"] += 1
                 continue
 
-            if debt_usd < Decimal(100):
+            if debt_usd <= 0 or debt_usd < Decimal(str(min_debt_usd)):
                 stats["dropped_debt_under_100"] += 1
                 continue
 
@@ -388,7 +402,8 @@ def compute_positions(raw, prices, accrue=True):
 def fetch_high_risk_positions(
     top_reserves=5,
     borrowers_per_reserve=15,
-    return_stats=False
+    return_stats=False,
+    return_inputs=False,
 ):
     raw = fetch_raw_positions(top_reserves, borrowers_per_reserve)
 
@@ -401,6 +416,9 @@ def fetch_high_risk_positions(
             "dropped_debt_under_100": 0,
             "price_source": "unknown",
         }
+        if return_inputs:
+            return pd.DataFrame(), empty_stats, raw, {}
+
         return (pd.DataFrame(), empty_stats) if return_stats else pd.DataFrame()
 
     prices, source = build_prices(raw)
@@ -410,8 +428,12 @@ def fetch_high_risk_positions(
     if unpriced:
         print(f"Warning: No price for: {unpriced}")
 
-    df, stats = compute_positions(raw, prices)
+    prepared = prepare_balances(raw)
+    df, stats = compute_positions(prepared, prices, accrue=False)
     stats["price_source"] = source
     print("STATS:", stats)
+
+    if return_inputs:
+        return df, stats, prepared, prices
 
     return (df, stats) if return_stats else df

@@ -55,3 +55,29 @@ def test_both_sources_fail():
 
     with pytest.raises(RuntimeError, match="Both live Aave data"):
         load_with_fallback(load_live, load_snapshot, 8, 60)
+
+def test_live_scenario_inputs_are_preserved():
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    positions = pd.DataFrame({"wallet_full": ["0xabc"]})
+    prepared = pd.DataFrame({"symbol": ["WETH"]})
+    prices = {"0xaaa": 1000}
+
+    def load_live(*args):
+        return (
+            positions,
+            {"wallets_fetched": 1},
+            now,
+            {"lag_blocks": 0},
+            (prepared, prices),
+        )
+
+    def load_snapshot():
+        raise AssertionError("Snapshot should not be called")
+
+    result = load_with_fallback(load_live, load_snapshot, 8, 60)
+
+    assert result[4] == "live"
+    assert result[5][0].equals(prepared)
+    assert result[5][1] == prices
