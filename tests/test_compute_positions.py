@@ -1,9 +1,9 @@
-
 import pandas as pd
 import pytest
 from decimal import Decimal
 from data_fetcher import compute_positions
-
+from data_fetcher import prepare_balances
+from stress_engine import simulate_price_shock
 
 WALLET = "0x1111111111111111111111111111111111111111"
 COLLATERAL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -188,3 +188,44 @@ def test_multiple_collateral_and_debt_assets():
         (1500 * 0.8 + 500 * 0.7) / 1500
     )
     assert df.iloc[0]["primary_collateral"] == "WETH"
+
+def test_return_inputs_on_nonempty_data(monkeypatch):
+    import data_fetcher as d
+
+    raw = make_positions()
+    prices = PRICES.copy()
+
+    monkeypatch.setattr(
+        d, "fetch_raw_positions",
+        lambda *args, **kwargs: raw.copy()
+    )
+    monkeypatch.setattr(
+        d, "build_prices",
+        lambda raw: (prices.copy(), "aave-oracle")
+    )
+    monkeypatch.setattr(
+        d, "prepare_balances",
+        lambda raw: raw.copy()
+    )
+
+    positions, stats, prepared, returned_prices = (
+        d.fetch_high_risk_positions(
+            return_inputs=True
+        )
+    )
+
+    assert len(positions) == 1
+    assert stats["wallets_fetched"] == 1
+    assert stats["price_source"] == "aave-oracle"
+    assert prepared.equals(raw)
+    assert returned_prices == prices
+
+    scenario = simulate_price_shock(
+        prepared,
+        returned_prices,
+        {COLLATERAL: -0.20},
+    )
+
+    assert scenario.iloc[0]["baseline_hf"] == pytest.approx(
+        positions.iloc[0]["health_factor"]
+    )

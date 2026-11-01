@@ -8,6 +8,7 @@ from data_fetcher import fetch_high_risk_positions
 from datetime import datetime, timezone
 from recovery import load_with_fallback
 from f11_fallback import load_github_snapshot
+from stress_engine import simulate_price_shock
 
 st.set_page_config(
     page_title="Aave V3 Liquidation Risk Monitor",
@@ -24,12 +25,12 @@ st.caption(
 # ── Fetch data ──────────────────────────────────────────────
 @st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_positions(top_reserves, borrowers_per_reserve):
-    positions, stats = fetch_high_risk_positions(
+    positions, stats, prepared, prices = fetch_high_risk_positions(
         top_reserves=top_reserves,
         borrowers_per_reserve=borrowers_per_reserve,
-        return_stats=True
+        return_stats=True,
+        return_inputs=True,
     )
-
     fetched_at = datetime.now(timezone.utc)
 
     # Observe data-source freshness after calculating positions.
@@ -52,7 +53,7 @@ def load_positions(top_reserves, borrowers_per_reserve):
         "indexing_errors": graph_meta["hasIndexingErrors"],
     }
 
-    return positions, stats, fetched_at, freshness
+    return positions, stats, fetched_at, freshness, (prepared, prices)
 
 @st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_positions_with_fallback(top_reserves, borrowers_per_reserve):
@@ -71,6 +72,7 @@ with st.spinner("Loading Aave positions..."):
             fetched_at,
             freshness,
             data_source,
+            scenario_inputs,
         ) = load_positions_with_fallback(8, 60)
     except Exception as e:
         st.error(
@@ -319,6 +321,139 @@ scenarios["Collateral Held by These Positions (USD)"] = [
 ]
 
 st.dataframe(scenarios, width="stretch", hide_index=True)
+
+
+st.subheader("F13 — Asset-Specific Price Shock")
+
+if scenario_inputs is None:
+    st.info(
+        "Asset-specific simulation is unavailable while using "
+        "historical snapshot recovery."
+    )
+else:
+    prepared, prices = scenario_inputs
+
+    assets = (
+        prepared[["underlying", "symbol"]]
+        .drop_duplicates(subset=["underlying"])
+        .copy()
+    )
+
+    assets["underlying"] = assets["underlying"].str.lower()
+    assets = assets[assets["underlying"].isin(prices)]
+    assets = assets.sort_values(["symbol", "underlying"])
+
+    if assets.empty:
+        st.info("No priced assets available for simulation.")
+    else:
+        options = {
+            f"{r.symbol} ({r.underlying[:10]}...)": r.underlying
+            for r in assets.itertuples()
+        }
+
+        asset_label = st.selectbox(
+            "Asset to stress",
+            options=list(options),
+        )
+
+        drop_pct = st.slider(
+            "Price decrease (%)",
+            min_value=0,
+            max_value=80,
+            value=20,
+            step=5,
+        )
+
+        try:
+            result = simulate_price_shock(
+                prepared,
+                prices,
+                {options[asset_label]: -drop_pct / 100},
+            )
+
+            selected_asset = options[asset_label]
+
+            asset_positions = prepared[
+                prepared["underlying"].str.lower() == selected_asset
+            ].copy()
+
+            asset_positions["holds_selected_collateral"] = (
+                asset_positions["collateral_enabled"]
+                & (asset_positions["atoken_balance_raw"] > 0)
+            )
+
+            asset_positions["owes_selected_asset"] = (
+                asset_positions["debt_raw"] > 0
+            )
+
+            exposure = asset_positions[
+                [
+                    "wallet",
+                    "holds_selected_collateral",
+                    "owes_selected_asset",
+                ]
+            ].rename(columns={"wallet": "wallet_full"})
+
+            result = result.merge(
+                exposure,
+                on="wallet_full",
+                how="left",
+                validate="one_to_one",
+            )
+
+            result["holds_selected_collateral"] = (
+                result["holds_selected_collateral"].fillna(False).astype(bool)
+            )
+
+            result["owes_selected_asset"] = (
+                result["owes_selected_asset"].fillna(False).astype(bool)
+            )
+
+            newly = result[result["newly_liquidatable"]]
+            already = result[result["already_liquidatable"]]
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric("Newly Liquidatable", len(newly))
+            c2.metric("Already Liquidatable", len(already))
+            c3.metric(
+                "Debt of Newly Liquidatable Wallets",
+                f"${newly['stressed_debt_usd'].sum():,.0f}",
+            )
+
+            st.caption(
+                "Hypothetical single-asset price shock. "
+                "Debt shown is outstanding debt, not expected losses. "
+                "No liquidation execution is simulated."
+            )
+
+            st.markdown("#### 20 Lowest Simulated Health Factors")
+
+            st.caption(
+                "Shows the 20 monitored wallets with the lowest Health Factors "
+                "after the selected price shock. Wallets are ranked by simulated HF, "
+                "regardless of whether they hold or borrow the selected asset. "
+                "Some wallets may already be liquidatable or remain unaffected "
+                "by this scenario."
+            )
+
+            st.caption(
+                "HF Change = Stressed HF − Baseline HF. "
+                "A negative value means the borrower's liquidation safety "
+                "margin decreased; a positive value means it improved."
+            )
+
+            st.dataframe(
+                result.sort_values("stressed_hf").head(20),
+                width="stretch",
+                hide_index=True,
+            )
+
+        except ValueError as exc:
+            st.warning(
+                "This scenario could not be compared consistently: "
+                f"{exc}"
+            )
 
 # ── Section 4: Top At-Risk Positions ─────────────────────────
 st.subheader("Top Monitored Positions by Debt")
