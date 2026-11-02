@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import os
 import data_fetcher as d
-from scenario_presets import PRESETS
+from scenario_presets import PRESETS, resolve_preset
 from web3 import Web3
 from data_fetcher import fetch_high_risk_positions
 from datetime import datetime, timezone
@@ -502,18 +502,7 @@ else:
                     changes[asset_options[label]] = pct / 100
 
         else:
-            changes = {}
-            missing_assets = []
-
-            for symbol, pct in PRESETS[scenario].items():
-                matching = assets[assets["symbol"] == symbol]
-
-                if matching.empty:
-                    missing_assets.append(symbol)
-                    continue
-
-                for address in matching["underlying"]:
-                    changes[address] = pct / 100
+            changes, missing_assets = resolve_preset(scenario, assets)
 
             if missing_assets:
                 st.error(
