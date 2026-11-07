@@ -39,6 +39,7 @@ jobs:
       - name: Build and validate snapshot
         env:
           ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+          GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
           AAVE_POOL_ADDRESS: ${{ secrets.AAVE_POOL_ADDRESS }}
           AAVE_ORACLE_ADDRESS: ${{ secrets.AAVE_ORACLE_ADDRESS }}
         run: python f11_snapshot.py
