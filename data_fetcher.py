@@ -6,7 +6,17 @@ import os
 from decimal import Decimal, localcontext
 SECONDS_PER_YEAR = 365 * 24 * 3600
 
-SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1756180/aave-v-3-risk-monitor/v0.0.2"
+SUBGRAPH_ID = "Cd2gEDVeqnjBn1hSeqFMitw8Q1iiyV9FYUZkLNRcL87g"
+
+def get_subgraph_url():
+    key = os.environ.get("GRAPH_API_KEY")
+    if not key:
+        raise RuntimeError("GRAPH_API_KEY is not configured")
+
+    return (
+        f"https://gateway.thegraph.com/api/{key}"
+        f"/subgraphs/id/{SUBGRAPH_ID}"
+    )
 
 SYMBOL_TO_COINGECKO_ID = {
     "WETH": "ethereum", "WBTC": "wrapped-bitcoin", "USDC": "usd-coin",
@@ -27,7 +37,11 @@ def is_pendle_pt_token(symbol: str) -> bool:
     return symbol.startswith("PT-")
 
 def _gql(query: str) -> dict:
-    resp = requests.post(SUBGRAPH_URL, json={"query": query}, timeout=30)
+    resp = requests.post(
+        get_subgraph_url(),
+        json={"query": query},
+        timeout=30,
+    )
     resp.raise_for_status()
     body = resp.json()
     if body.get("errors"):
