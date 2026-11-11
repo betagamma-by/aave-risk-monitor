@@ -3,7 +3,7 @@
 from decimal import Decimal, localcontext
 from data_fetcher import compute_positions
 
-def simulate_price_shock(prepared_raw, prices, shocks):
+def simulate_price_shock(prepared_raw, prices, shocks, return_prices=False):
     """
     prepared_raw: balances already adjusted for accrual/GHO,
                   stored in atoken_balance_raw and debt_raw.
@@ -81,5 +81,8 @@ def simulate_price_shock(prepared_raw, prices, shocks):
         (result["baseline_hf"] >= 1.0)
         & (result["stressed_hf"] < 1.0)
     )
+
+    if return_prices:
+        return result, stressed_prices
 
     return result
