@@ -11,6 +11,166 @@ from recovery import load_with_fallback
 from f11_fallback import load_github_snapshot
 from stress_engine import simulate_price_shock
 
+def show_liquidation_wallet_selector(results, prepared, stressed_prices, key):
+    eligible = results.loc[
+        results["stressed_hf"] < 1
+    ].drop_duplicates("wallet_full").sort_values("stressed_hf")
+
+    with st.expander(
+        f"Liquidation Exposure — {len(eligible)} eligible wallets"
+    ):
+        if eligible.empty:
+            st.info("No monitored wallets have simulated HF below 1.")
+            return
+
+        wallet = st.selectbox(
+            "Select borrower wallet",
+            eligible["wallet_full"].tolist(),
+            key=f"{key}_wallet",
+        )
+
+        position = eligible.loc[
+            eligible["wallet_full"] == wallet
+        ].iloc[0]
+
+        st.code(wallet)
+        st.metric(
+            "Simulated Health Factor",
+            f"{float(position['stressed_hf']):.6f}",
+        )
+
+        reserves = prepared.loc[
+            prepared["wallet"].str.lower() == wallet.lower()
+        ].copy()
+
+        debt = reserves.loc[
+            reserves["debt_raw"] > 0
+        ]
+
+        collateral = reserves.loc[
+            (reserves["collateral_enabled"])
+            & (reserves["atoken_balance_raw"] > 0)
+        ]
+
+        if debt.empty or collateral.empty:
+            st.warning(
+                "No eligible debt/collateral pair was found "
+                "in the monitored position data."
+            )
+            return
+
+        debt_asset = st.selectbox(
+            "Debt asset to repay",
+            debt["underlying"].tolist(),
+            format_func=lambda address: debt.loc[
+                debt["underlying"] == address, "symbol"
+            ].iloc[0],
+            key=f"{key}_debt",
+        )
+
+        collateral_asset = st.selectbox(
+            "Collateral asset to seize",
+            collateral["underlying"].tolist(),
+            format_func=lambda address: collateral.loc[
+                collateral["underlying"] == address, "symbol"
+            ].iloc[0],
+            key=f"{key}_collateral",
+        )
+
+        if st.button("Calculate indicative exposure", key=f"{key}_calculate"):
+            try:
+                ids = tuple(used_emode_ids(prepared))
+                reserve_configs, emode_configs = load_liquidation_configs(ids)
+
+                exposure = estimate_wallet_liquidation(
+                    prepared_raw=prepared,
+                    stressed_prices=stressed_prices,
+                    wallet=wallet,
+                    stressed_hf=position["stressed_hf"],
+                    debt_address=debt_asset,
+                    collateral_address=collateral_asset,
+                    reserve_configs=reserve_configs,
+                    emode_configs=emode_configs,
+                )
+
+                a, b = st.columns(2)
+                a.metric(
+                    "Indicative debt repayable",
+                    f"${float(exposure['repayable_debt_usd']):,.2f}",
+                )
+                b.metric(
+                    "Indicative collateral seized",
+                    f"${float(exposure['collateral_seized_usd']):,.2f}",
+                )
+                st.caption(
+                    f"Modeled close factor: {exposure['close_factor']:.0%} | "
+                    f"Liquidation bonus: {exposure['liquidation_bonus_pct']:.2%}"
+                )
+
+                st.markdown("#### Liquidation Fee Breakdown")
+
+                c1, c2 = st.columns(2)
+
+                c1.metric(
+                    "Protocol Fee",
+                    f"${float(exposure['protocol_fee_usd']):,.2f}",
+                )
+
+                c2.metric(
+                    "Collateral to Liquidator",
+                    f"${float(exposure['liquidator_collateral_usd']):,.2f}",
+                )
+
+                st.metric(
+                    "Net Bonus Before Execution Costs",
+                    f"${float(exposure['net_bonus_before_costs_usd']):,.2f}",
+                )
+
+                st.caption(
+                    f"Protocol fee: {exposure['protocol_fee_bps'] / 100:.2f}% "
+                    "of the gross liquidation bonus. "
+                    "Net bonus excludes gas, slippage, flash-loan fees and other costs."
+                )
+
+                if exposure["passes_dust_check"]:
+                    st.success(
+                        "Preliminary dust check: Passed. "
+                        "This does not guarantee an executable liquidation."
+                    )
+                else:
+                    st.error(
+                        "Preliminary dust check: Failed. "
+                        "The proposed liquidation may leave prohibited "
+                        "small debt or collateral balances."
+                    )
+
+                st.caption(
+                    f"Remaining selected debt: "
+                    f"${float(exposure['remaining_debt_asset_usd']):,.2f} | "
+                    f"Remaining selected collateral: "
+                    f"${float(exposure['remaining_collateral_asset_usd']):,.2f}"
+                )
+
+                st.warning(
+                    "Indicative simulation only, not an executable liquidation quote. "
+                    "Includes the modeled liquidation protocol fee. "
+                    "Excludes slippage, gas, flash-loan fees, execution restrictions, "
+                    "token-unit rounding and potential configuration changes."
+                )
+            except (ValueError, KeyError, RuntimeError) as exc:
+                st.warning(f"Exposure unavailable: {exc}")
+
+from wallet_liquidation import estimate_wallet_liquidation
+from reserve_config_fetcher import fetch_reserve_configs
+from emode_fetcher import fetch_emode_configs, used_emode_ids
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_liquidation_configs(emode_ids):
+    return (
+        fetch_reserve_configs(),
+        fetch_emode_configs(list(emode_ids)),
+    )
+
 st.set_page_config(
     page_title="Aave V3 Liquidation Risk Monitor",
     page_icon="⚠️",
@@ -366,10 +526,11 @@ else:
         )
 
         try:
-            result = simulate_price_shock(
+            result, stressed_prices_result = simulate_price_shock(
                 prepared,
                 prices,
                 {options[asset_label]: -drop_pct / 100},
+                return_prices=True,
             )
 
             selected_asset = options[asset_label]
@@ -448,6 +609,10 @@ else:
                 result.sort_values("stressed_hf").head(20),
                 width="stretch",
                 hide_index=True,
+            )
+
+            show_liquidation_wallet_selector(
+                result, prepared, stressed_prices_result, "single_asset"
             )
 
         except ValueError as exc:
@@ -538,10 +703,11 @@ else:
             )
 
             try:
-                multi_result = simulate_price_shock(
+                multi_result, stressed_prices_multi_result = simulate_price_shock(
                     prepared,
                     prices,
                     changes,
+                    return_prices=True,
                 )
 
                 newly_multi = multi_result[
@@ -571,6 +737,10 @@ else:
                     multi_result.sort_values("stressed_hf").head(20),
                     width="stretch",
                     hide_index=True,
+                )
+
+                show_liquidation_wallet_selector(
+                    multi_result, prepared, stressed_prices_multi_result, "multi_asset"
                 )
 
             except ValueError as exc:
