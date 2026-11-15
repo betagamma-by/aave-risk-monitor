@@ -30,7 +30,7 @@ POOL_ABI = [
 ]
 
 
-def fetch_reserve_configs(addresses=None):
+def fetch_reserve_configs(addresses=None, block_identifier=None):
     """Fetch actual Ethereum Aave V3 reserve configuration."""
 
     rpc_url = os.environ["ETH_RPC_URL"]
@@ -57,7 +57,18 @@ def fetch_reserve_configs(addresses=None):
     )
 
     # Use one Ethereum block for the reserve list and configurations.
-    block = w3.eth.block_number
+    if block_identifier is not None and (
+        isinstance(block_identifier, bool)
+        or not isinstance(block_identifier, int)
+        or block_identifier < 0
+    ):
+        raise ValueError("block_identifier must be a non-negative integer")
+
+    block = (
+        w3.eth.block_number
+        if block_identifier is None
+        else block_identifier
+    )
 
     known_reserves = {
         addr.lower()

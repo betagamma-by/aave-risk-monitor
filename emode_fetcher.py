@@ -77,7 +77,7 @@ def used_emode_ids(prepared_raw):
     return sorted(ids)
 
 
-def fetch_emode_configs(category_ids):
+def fetch_emode_configs(category_ids, block_identifier=None):
     """Fetch all requested eMode categories at one Ethereum block."""
     ids = sorted(set(category_ids))
 
@@ -112,7 +112,18 @@ def fetch_emode_configs(category_ids):
         abi=EMODE_ABI,
     )
 
-    block = w3.eth.block_number
+    if block_identifier is not None and (
+        isinstance(block_identifier, bool)
+        or not isinstance(block_identifier, int)
+        or block_identifier < 0
+    ):
+        raise ValueError("block_identifier must be a non-negative integer")
+
+    block = (
+        w3.eth.block_number
+        if block_identifier is None
+        else block_identifier
+    )
 
     known_reserves = {
         address.lower()

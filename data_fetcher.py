@@ -36,7 +36,11 @@ def is_pendle_pt_token(symbol: str) -> bool:
     """Pendle Principal Tokens require per-maturity pricing we don't support — exclude explicitly."""
     return symbol.startswith("PT-")
 
-def _gql(query: str) -> dict:
+def _gql(query: str, block_identifier=None) -> dict:
+    if block_identifier is not None:
+        from subgraph_block import pin_subgraph_query
+        query = pin_subgraph_query(query, block_identifier)
+
     resp = requests.post(
         get_subgraph_url(),
         json={"query": query},
@@ -79,45 +83,66 @@ ORACLE_ABI = [
 ]
 
 
-def fetch_aave_prices(addresses):
+def fetch_aave_prices(addresses, block_identifier=None):
     """USD price per underlying address, straight from Aave's oracle. Keys are lowercase."""
     from web3 import Web3
     w3 = Web3(Web3.HTTPProvider(os.environ["ETH_RPC_URL"], request_kwargs={"timeout": 20}))
     oracle = w3.eth.contract(address=Web3.to_checksum_address(os.environ["AAVE_ORACLE_ADDRESS"]),
                              abi=ORACLE_ABI)
-    unit = oracle.functions.BASE_CURRENCY_UNIT().call()   # fails loudly if this isn't the oracle
+    unit = oracle.functions.BASE_CURRENCY_UNIT().call(block_identifier=block_identifier)   # fails loudly if this isn't the oracle
     addrs = sorted(addresses)
     checksummed = [Web3.to_checksum_address(a) for a in addrs]
     try:
-        raw_prices = oracle.functions.getAssetsPrices(checksummed).call()
+        raw_prices = oracle.functions.getAssetsPrices(checksummed).call(block_identifier=block_identifier)
         prices = dict(zip(addrs, raw_prices))
     except Exception:
         prices = {}                                         # batch failed: try one by one
         for a, c in zip(addrs, checksummed):
             try:
-                prices[a] = oracle.functions.getAssetPrice(c).call()
+                prices[a] = oracle.functions.getAssetPrice(c).call(block_identifier=block_identifier)
             except Exception:
                 prices[a] = 0
     return {a: p / unit for a, p in prices.items() if p > 0}
 
-def build_prices(raw):
-    """Aave oracle if the env vars are set, otherwise the old CoinGecko path."""
-    addrs = set(raw["underlying"])
-    if os.environ.get("ETH_RPC_URL") and os.environ.get("AAVE_ORACLE_ADDRESS"):
-        return fetch_aave_prices(addrs), "aave-oracle"
-    sym = raw.drop_duplicates("underlying").set_index("underlying")["symbol"].to_dict()
-    cg = fetch_live_prices({s for s in sym.values() if not is_pendle_pt_token(s)})
-    return {a: cg[s] for a, s in sym.items() if s in cg}, "coingecko"
+def build_prices(raw, block_identifier=None):
+    """Use Aave Oracle exclusively for liquidation-risk pricing."""
+    if not (
+        os.environ.get("ETH_RPC_URL")
+        and os.environ.get("AAVE_ORACLE_ADDRESS")
+    ):
+        raise RuntimeError(
+            "Aave Oracle configuration missing: "
+            "ETH_RPC_URL and AAVE_ORACLE_ADDRESS are required. "
+            "CoinGecko fallback is disabled."
+        )
 
-def rank_reserves_by_usd(top_n):
+    addresses = set(raw["underlying"])
+    prices = (
+        fetch_aave_prices(addresses)
+        if block_identifier is None
+        else fetch_aave_prices(
+            addresses, block_identifier=block_identifier
+        )
+    )
+
+    return prices, "aave-oracle"
+
+def rank_reserves_by_usd(top_n, block_identifier=None):
     """Pick the reserves with the largest USD debt (variable + stable), not raw token units."""
     res = _gql("""{ reserves(first: 200) { id symbol decimals underlyingAsset
-                   totalCurrentVariableDebt totalPrincipalStableDebt } }""")["reserves"]
+                   totalCurrentVariableDebt totalPrincipalStableDebt } }""", block_identifier=block_identifier)["reserves"]
     df = pd.DataFrame(res)
     if df.empty:
         raise ValueError("No reserves found")
     df["underlying"] = df["underlyingAsset"].str.lower()
-    prices, source = build_prices(df[["underlying", "symbol"]])
+    price_input = df[["underlying", "symbol"]]
+    prices, source = (
+        build_prices(price_input)
+        if block_identifier is None
+        else build_prices(
+            price_input, block_identifier=block_identifier
+        )
+    )
     tokens = (df["totalCurrentVariableDebt"].astype(float)
               + df["totalPrincipalStableDebt"].astype(float)) / 10.0 ** df["decimals"].astype(int)
     df["debt_usd"] = tokens * df["underlying"].map(prices).fillna(0)
@@ -131,7 +156,7 @@ def rank_reserves_by_usd(top_n):
           [["symbol", "debt_usd_M"]].to_string(index=False))
     return ranked.head(top_n)[["id", "symbol"]].to_dict("records")
 
-def fetch_raw_for_wallets(wallets):
+def fetch_raw_for_wallets(wallets, block_identifier=None):
     """Detailed positions for the given wallet ids: one row per wallet-reserve."""
     wallets = sorted(wallets)
     rows = []
@@ -147,7 +172,7 @@ def fetch_raw_for_wallets(wallets):
                         liquidityIndex variableBorrowIndex liquidityRate variableBorrowRate
                         lastUpdateTimestamp } } } }"""
             % wallets_filter
-        )["users"]
+        , block_identifier=block_identifier)["users"]
         for u in users:
             cat = u.get("eModeCategoryId")
             cat_id = int(cat["id"]) if cat else 0
@@ -179,33 +204,36 @@ def fetch_raw_for_wallets(wallets):
     return pd.DataFrame(rows)
 
 
-def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15):
-    reserves = rank_reserves_by_usd(top_reserves)
+def fetch_raw_positions(top_reserves=5, borrowers_per_reserve=15, block_identifier=None):
+    reserves = rank_reserves_by_usd(top_reserves, block_identifier=block_identifier)
     wallets = set()
     for r in reserves:
         d = _gql(
             """{ userReserves(first: %d, orderBy: currentTotalDebt, orderDirection: desc,
                 where: { reserve: "%s", currentTotalDebt_gt: "0" }) { user { id } } }"""
             % (borrowers_per_reserve, r["id"])
-        )
+        , block_identifier=block_identifier)
         wallets |= {ur["user"]["id"] for ur in d["userReserves"]}
     if not wallets:
         return pd.DataFrame()
-    return fetch_raw_for_wallets(wallets)
+    return fetch_raw_for_wallets(wallets, block_identifier=block_identifier)
 
 def add_accrued_balances(raw, now_ts=None):
     """Grow balances to now: scaled balance x reserve index, with the index extended from the
     reserve's last update to now using its current rate (supply: linear, borrow: compounded)."""
     now_ts = now_ts or time.time()
-    r = raw.copy()
+    from balance_normalization import normalize_negative_debt_dust
+
+    r = normalize_negative_debt_dust(raw)
     dt = (now_ts - r["reserve_updated_ts"].astype(float)).clip(lower=0)
     liq = r["liq_index"].astype(float) / 1e27 * (1 + r["liq_rate"].astype(float) / 1e27 * dt / SECONDS_PER_YEAR)
     bor = r["borrow_index"].astype(float) / 1e27 * np.exp(r["borrow_rate"].astype(float) / 1e27 * dt / SECONDS_PER_YEAR)
     r["atoken_now_raw"] = r["scaled_atoken_raw"].astype(float) * liq
     r["debt_now_raw"] = r["scaled_vdebt_raw"].astype(float) * bor + r["stable_debt_raw"].astype(float)
+
     return r
 
-def override_gho_debt(raw):
+def override_gho_debt(raw, block_identifier=None):
     """Replace GHO debt with its actual on-chain debt-token balance."""
     from web3 import Web3
 
@@ -227,18 +255,31 @@ def override_gho_debt(raw):
             "outputs": [{"type": t} for t in outputs],
         }
 
+    if block_identifier is not None and (
+        isinstance(block_identifier, bool)
+        or not isinstance(block_identifier, int)
+        or block_identifier < 0
+    ):
+        raise ValueError("block_identifier must be a non-negative integer")
+
+    block = (
+        w3.eth.block_number
+        if block_identifier is None
+        else block_identifier
+    )
+
     pool = w3.eth.contract(
         address=Web3.to_checksum_address(os.environ["AAVE_POOL_ADDRESS"]),
         abi=[abi_fn("ADDRESSES_PROVIDER", [], ["address"])]
     )
 
-    provider_address = pool.functions.ADDRESSES_PROVIDER().call()
+    provider_address = pool.functions.ADDRESSES_PROVIDER().call(block_identifier=block)
     provider = w3.eth.contract(
         address=provider_address,
         abi=[abi_fn("getPoolDataProvider", [], ["address"])]
     )
 
-    data_provider_address = provider.functions.getPoolDataProvider().call()
+    data_provider_address = provider.functions.getPoolDataProvider().call(block_identifier=block)
     dp = w3.eth.contract(
         address=data_provider_address,
         abi=[abi_fn("getReserveTokensAddresses",
@@ -249,7 +290,6 @@ def override_gho_debt(raw):
         raw.loc[gho_mask, "underlying"].iloc[0]
     )
 
-    block = w3.eth.block_number
 
     _, _, debt_token_address = dp.functions.getReserveTokensAddresses(
         gho_address
@@ -277,10 +317,36 @@ def override_gho_debt(raw):
 
     return result
 
-def prepare_balances(raw, now_ts=None):
+def prepare_balances(raw, now_ts=None, block_identifier=None):
     """Apply interest accrual and GHO correction once."""
+    if block_identifier is not None and now_ts is None:
+        raise ValueError(
+            "now_ts must be the selected block timestamp"
+        )
+
+    if block_identifier is not None:
+        from historical_debt_verification import verify_negative_debt_at_block
+
+        from data_integrity_errors import DataIntegrityError
+
+        try:
+            verify_negative_debt_at_block(
+                raw,
+                block_identifier=block_identifier,
+            )
+        except Exception as exc:
+            raise DataIntegrityError(
+                f"Historical debt verification failed: {exc}"
+            ) from exc
+
     prepared = add_accrued_balances(raw, now_ts=now_ts)
-    prepared = override_gho_debt(prepared)
+    prepared = (
+        override_gho_debt(prepared)
+        if block_identifier is None
+        else override_gho_debt(
+            prepared, block_identifier=block_identifier
+        )
+    )
 
     prepared["atoken_balance_raw"] = prepared["atoken_now_raw"]
     prepared["debt_raw"] = prepared["debt_now_raw"]
@@ -418,8 +484,23 @@ def fetch_high_risk_positions(
     borrowers_per_reserve=15,
     return_stats=False,
     return_inputs=False,
+    block_identifier=None,
+    block_timestamp=None,
 ):
-    raw = fetch_raw_positions(top_reserves, borrowers_per_reserve)
+    if block_identifier is not None and block_timestamp is None:
+        raise ValueError(
+            "block_timestamp is required for historical snapshots"
+        )
+
+    raw = (
+        fetch_raw_positions(top_reserves, borrowers_per_reserve)
+        if block_identifier is None
+        else fetch_raw_positions(
+            top_reserves,
+            borrowers_per_reserve,
+            block_identifier=block_identifier,
+        )
+    )
 
     if raw.empty:
         empty_stats = {
@@ -435,14 +516,26 @@ def fetch_high_risk_positions(
 
         return (pd.DataFrame(), empty_stats) if return_stats else pd.DataFrame()
 
-    prices, source = build_prices(raw)
+    prices, source = (
+        build_prices(raw)
+        if block_identifier is None
+        else build_prices(raw, block_identifier=block_identifier)
+    )
     unpriced = sorted(set(
         raw.loc[~raw["underlying"].isin(prices), "symbol"]
     ))
     if unpriced:
         print(f"Warning: No price for: {unpriced}")
 
-    prepared = prepare_balances(raw)
+    prepared = (
+        prepare_balances(raw)
+        if block_identifier is None
+        else prepare_balances(
+            raw,
+            now_ts=block_timestamp,
+            block_identifier=block_identifier,
+        )
+    )
     df, stats = compute_positions(prepared, prices, accrue=False)
     stats["price_source"] = source
     print("STATS:", stats)

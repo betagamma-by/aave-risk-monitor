@@ -1,7 +1,7 @@
 from liquidation_fees import estimate_liquidation_fee
 """Pair-specific, indicative liquidation exposure under a price scenario."""
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from emode_fetcher import applicable_liquidation_bonus
 from liquidation_pair import estimate_liquidation_pair
@@ -70,12 +70,11 @@ def estimate_wallet_liquidation(
         emode_configs,
     )
 
-    total_debt = sum(
-        valued["debt_usd"], Decimal(0)
-    )
-    total_collateral = sum(
-        valued["collateral_usd"], Decimal(0)
-    )
+    # Aggregate using the same precision as per-reserve valuation.
+    with localcontext() as ctx:
+        ctx.prec = 80
+        total_debt = sum(valued["debt_usd"], Decimal(0))
+        total_collateral = sum(valued["collateral_usd"], Decimal(0))
 
     estimate = estimate_liquidation_pair(
         health_factor=hf,
