@@ -12,6 +12,12 @@ def load_with_fallback(load_live, load_snapshot, top_reserves, borrowers_per_res
         return positions, stats, fetched_at, freshness, "live", scenario_inputs
 
     except Exception as live_error:
+        from data_integrity_errors import DataIntegrityError
+
+        # Never replace a failed integrity check with unverified data.
+        if isinstance(live_error, DataIntegrityError):
+            raise
+
         try:
             positions, stats, captured_at, metadata = load_snapshot()
             stats = stats.copy()

@@ -11,7 +11,22 @@ from recovery import load_with_fallback
 from f11_fallback import load_github_snapshot
 from stress_engine import simulate_price_shock
 
-def show_liquidation_wallet_selector(results, prepared, stressed_prices, key):
+def show_liquidation_wallet_selector(results, prepared, stressed_prices, key, snapshot_block, data_source, scenario_inputs_present, historical_debt_verified):
+
+    from exposure_access import exposure_available
+
+    if not exposure_available(
+        data_source,
+        scenario_inputs_present,
+        snapshot_block,
+        historical_debt_verified,
+    ):
+        st.warning(
+            "Indicative liquidation exposure is unavailable in "
+            "recovery mode or without verified live scenario inputs."
+        )
+        return
+
     eligible = results.loc[
         results["stressed_hf"] < 1
     ].drop_duplicates("wallet_full").sort_values("stressed_hf")
@@ -28,6 +43,13 @@ def show_liquidation_wallet_selector(results, prepared, stressed_prices, key):
             eligible["wallet_full"].tolist(),
             key=f"{key}_wallet",
         )
+        # Reset the previous calculation when the wallet changes.
+        wallet_state_key = f"{key}_previous_wallet"
+
+        if st.session_state.get(wallet_state_key) != wallet:
+            st.session_state[wallet_state_key] = wallet
+            st.rerun()
+
 
         position = eligible.loc[
             eligible["wallet_full"] == wallet
@@ -80,7 +102,7 @@ def show_liquidation_wallet_selector(results, prepared, stressed_prices, key):
         if st.button("Calculate indicative exposure", key=f"{key}_calculate"):
             try:
                 ids = tuple(used_emode_ids(prepared))
-                reserve_configs, emode_configs = load_liquidation_configs(ids)
+                reserve_configs, emode_configs = load_liquidation_configs(ids, block_identifier=snapshot_block)
 
                 exposure = estimate_wallet_liquidation(
                     prepared_raw=prepared,
@@ -165,16 +187,45 @@ from reserve_config_fetcher import fetch_reserve_configs
 from emode_fetcher import fetch_emode_configs, used_emode_ids
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_liquidation_configs(emode_ids):
-    return (
-        fetch_reserve_configs(),
-        fetch_emode_configs(list(emode_ids)),
+def load_liquidation_configs(emode_ids, block_identifier=None):
+    from config_block_validation import validate_liquidation_config_blocks
+
+    if block_identifier is None:
+        raise ValueError(
+            "Snapshot block required for liquidation configuration"
+        )
+
+    reserve_configs = fetch_reserve_configs(
+        block_identifier=block_identifier
     )
+    emode_configs = fetch_emode_configs(
+        list(emode_ids),
+        block_identifier=block_identifier,
+    )
+
+    validate_liquidation_config_blocks(
+        snapshot_block=block_identifier,
+        reserve_configs=reserve_configs,
+        emode_configs=emode_configs,
+    )
+
+    return reserve_configs, emode_configs
 
 st.set_page_config(
     page_title="Aave V3 Liquidation Risk Monitor",
     page_icon="⚠️",
     layout="wide"
+)
+
+st.warning(
+    "**HISTORICAL DATA NOTICE**\n\n"
+    "Borrower positions, Oracle prices, and liquidation configurations "
+    "are requested at the same historical Ethereum block. "
+    "Tiny negative subgraph debt values are checked against on-chain "
+    "balances before correction.\n\n"
+    "**Important:** Liquidation estimates are indicative simulations, "
+    "not executable quotes. Wallet balances may have changed since "
+    "the snapshot, and current on-chain positions are not yet verified."
 )
 
 st.title("⚠️ Aave V3 Liquidation Risk Monitor")
@@ -186,33 +237,49 @@ st.caption(
 # ── Fetch data ──────────────────────────────────────────────
 @st.cache_data(ttl=300, max_entries=2, show_spinner=False)
 def load_positions(top_reserves, borrowers_per_reserve):
-    positions, stats, prepared, prices = fetch_high_risk_positions(
-        top_reserves=top_reserves,
-        borrowers_per_reserve=borrowers_per_reserve,
-        return_stats=True,
-        return_inputs=True,
-    )
-    fetched_at = datetime.now(timezone.utc)
+    from snapshot_context import select_snapshot_context
+    from data_consistency import evaluate_data_freshness
 
-    # Observe data-source freshness after calculating positions.
+    # Select a snapshot BEFORE loading borrower positions.
     graph_meta = d._gql(
         "{ _meta { block { number } hasIndexingErrors } }"
     )["_meta"]
 
     w3 = Web3(Web3.HTTPProvider(
         os.environ["ETH_RPC_URL"],
-        request_kwargs={"timeout": 20}
+        request_kwargs={"timeout": 20},
     ))
 
-    chain_block = w3.eth.block_number
-    graph_block = int(graph_meta["block"]["number"])
+    if w3.eth.chain_id != 1:
+        raise RuntimeError("Expected Ethereum mainnet")
 
-    freshness = {
-        "chain_block": chain_block,
-        "graph_block": graph_block,
-        "lag_blocks": max(0, chain_block - graph_block),
-        "indexing_errors": graph_meta["hasIndexingErrors"],
-    }
+    context = select_snapshot_context(graph_meta, w3)
+
+    positions, stats, prepared, prices = fetch_high_risk_positions(
+        top_reserves=top_reserves,
+        borrowers_per_reserve=borrowers_per_reserve,
+        return_stats=True,
+        return_inputs=True,
+        block_identifier=context["snapshot_block"],
+        block_timestamp=context["snapshot_timestamp"],
+    )
+
+    fetched_at = datetime.now(timezone.utc)
+
+    freshness = evaluate_data_freshness(
+        chain_block=context["chain_block"],
+        graph_block=context["graph_block"],
+        indexing_errors=bool(graph_meta.get("hasIndexingErrors", False)),
+        max_lag_blocks=20,
+    )
+
+    freshness["snapshot_block"] = context["snapshot_block"]
+    freshness["snapshot_timestamp"] = context["snapshot_timestamp"]
+    freshness["positions_block_pinned"] = True
+    freshness["historical_debt_verified"] = True
+
+    # Overall consistency is not equivalent to current-wallet verification.
+    freshness["block_consistent"] = False
 
     return positions, stats, fetched_at, freshness, (prepared, prices)
 
@@ -236,12 +303,50 @@ with st.spinner("Loading Aave positions..."):
             scenario_inputs,
         ) = load_positions_with_fallback(8, 60)
     except Exception as e:
-        st.error(
-            "Unable to load Aave data from either the live sources "
-            "or the GitHub recovery snapshot."
-        )
+        from data_integrity_errors import DataIntegrityError
+
+        if isinstance(e, DataIntegrityError):
+            st.error(
+                "DATA INTEGRITY FAILURE — Historical on-chain "
+                "verification failed. Recovery fallback is disabled "
+                "to prevent presenting unverified positions."
+            )
+        else:
+            st.error(
+                "Unable to load Aave data from either the live sources "
+                "or the GitHub recovery snapshot."
+            )
+
         st.caption(f"Error type: {type(e).__name__}")
         st.stop()
+
+st.subheader("Data Integrity")
+
+c1, c2, c3 = st.columns(3)
+
+c1.metric("Data source", data_source.upper())
+
+snapshot_block = freshness.get("snapshot_block")
+c2.metric(
+    "Snapshot block",
+    f"{snapshot_block:,}" if snapshot_block is not None else "Unavailable",
+)
+
+verified = (
+    data_source == "live"
+    and freshness.get("historical_debt_verified") is True
+)
+
+c3.metric(
+    "Historical debt-dust verification",
+    "Passed" if verified else "Not verified",
+)
+
+st.caption(
+    "Verification covers negative subgraph debt-dust entries at the "
+    "selected historical Ethereum block, when present. "
+    "It does not verify the wallet's latest on-chain position."
+)
 
 if data_source == "snapshot":
     st.warning(
@@ -265,6 +370,34 @@ if data_source == "live":
     st.write(f"Ethereum head block: {freshness['chain_block']:,}")
     st.write(f"Subgraph indexed block: {freshness['graph_block']:,}")
     st.write(f"Indexing lag: {freshness['lag_blocks']} blocks")
+    status = freshness["status"]
+    st.write(f"Subgraph indexing status: **{status.upper()}**")
+
+    st.write(
+        "Position snapshot block:",
+        freshness.get("snapshot_block", "Not recorded"),
+    )
+    st.write(
+        "Position snapshot timestamp:",
+        freshness.get("snapshot_timestamp", "Not recorded"),
+    )
+    st.write(
+        "Positions block pinned:",
+        freshness.get("positions_block_pinned", False),
+    )
+
+    st.caption(
+        "Indexing status measures subgraph freshness only. "
+        "It does not establish block consistency between borrower "
+        "positions, oracle prices, and protocol configurations."
+    )
+
+    if freshness["lag_blocks"] < 0:
+        st.error(
+            "The subgraph reports a block ahead of this RPC provider. "
+            "The sources may be out of sync."
+        )
+
 
     if freshness["indexing_errors"]:
         st.error("Subgraph reports indexing errors.")
@@ -612,7 +745,14 @@ else:
             )
 
             show_liquidation_wallet_selector(
-                result, prepared, stressed_prices_result, "single_asset"
+                result,
+                prepared,
+                stressed_prices_result,
+                "single_asset",
+                snapshot_block=freshness.get("snapshot_block"),
+                data_source=data_source,
+                scenario_inputs_present=scenario_inputs is not None,
+                historical_debt_verified=verified,
             )
 
         except ValueError as exc:
@@ -740,7 +880,14 @@ else:
                 )
 
                 show_liquidation_wallet_selector(
-                    multi_result, prepared, stressed_prices_multi_result, "multi_asset"
+                    multi_result,
+                    prepared,
+                    stressed_prices_multi_result,
+                    "multi_asset",
+                    snapshot_block=freshness.get("snapshot_block"),
+                    data_source=data_source,
+                    scenario_inputs_present=scenario_inputs is not None,
+                    historical_debt_verified=verified,
                 )
 
             except ValueError as exc:

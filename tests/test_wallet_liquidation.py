@@ -160,3 +160,84 @@ def test_protocol_fee_comes_from_collateral_reserve():
     assert result["protocol_fee_bps"] == 2000
     assert result["protocol_fee_usd"] == Decimal("50")
     assert result["liquidator_collateral_usd"] == Decimal("5200")
+
+
+def test_decimal_collateral_aggregation_precision():
+    from decimal import localcontext
+
+    selected = Decimal(
+        "1234567.123456789123456789123456789123456789"
+    )
+    other = Decimal("0.000000000000000000000000000001")
+
+    with localcontext() as ctx:
+        ctx.prec = 80
+        total = sum([selected, other], Decimal(0))
+
+    assert total > selected
+    assert total - selected == other
+
+
+def test_wallet_liquidation_handles_tiny_secondary_collateral():
+    from unittest.mock import patch
+    from wallet_liquidation import estimate_wallet_liquidation
+
+    selected = Decimal(
+        "1234567.123456789123456789123456789123456789"
+    )
+    tiny = Decimal("0.000000000000000000000000000001")
+
+    prepared = pd.DataFrame([
+        {"wallet": "0xabc", "emode_id": 0},
+    ])
+
+    valued = pd.DataFrame([
+        {
+            "underlying": "0xdebt",
+            "symbol": "USDC",
+            "debt_usd": Decimal("500000"),
+            "collateral_usd": Decimal(0),
+        },
+        {
+            "underlying": "0xcollateral",
+            "symbol": "WETH",
+            "debt_usd": Decimal(0),
+            "collateral_usd": selected,
+        },
+        {
+            "underlying": "0xtiny",
+            "symbol": "OTHER",
+            "debt_usd": Decimal(0),
+            "collateral_usd": tiny,
+        },
+    ])
+
+    with (
+        patch(
+            "wallet_liquidation.value_wallet_reserves",
+            return_value=valued,
+        ),
+        patch(
+            "wallet_liquidation.applicable_liquidation_bonus",
+            return_value=Decimal("0.05"),
+        ),
+    ):
+        result = estimate_wallet_liquidation(
+            prepared_raw=prepared,
+            stressed_prices={},
+            wallet="0xabc",
+            stressed_hf=Decimal("0.90"),
+            debt_address="0xdebt",
+            collateral_address="0xcollateral",
+            reserve_configs={
+                "0xcollateral": {
+                    "liquidation_protocol_fee_bps": 2000,
+                }
+            },
+            emode_configs={},
+        )
+
+    assert result["total_collateral_usd"] > selected
+    assert result["selected_collateral_usd"] == selected
+    assert result["repayable_debt_usd"] > 0
+    assert result["collateral_seized_usd"] <= selected

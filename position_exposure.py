@@ -46,8 +46,19 @@ def value_wallet_reserves(prepared_raw, prices, wallet):
             collateral_raw = Decimal(str(r.atoken_balance_raw))
             debt_raw = Decimal(str(r.debt_raw))
 
+            if not collateral_raw.is_finite() or not debt_raw.is_finite():
+                raise ValueError(
+                    f"Non-finite reserve balance: wallet={r.wallet}, "
+                    f"asset={r.symbol}, address={address}, "
+                    f"collateral_raw={collateral_raw}, debt_raw={debt_raw}"
+                )
+
             if collateral_raw < 0 or debt_raw < 0:
-                raise ValueError("Negative reserve balance")
+                raise ValueError(
+                    f"Negative reserve balance: wallet={r.wallet}, "
+                    f"asset={r.symbol}, address={address}, "
+                    f"collateral_raw={collateral_raw}, debt_raw={debt_raw}"
+                )
 
             collateral_usd = (
                 collateral_raw / scale * price

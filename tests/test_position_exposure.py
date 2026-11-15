@@ -70,3 +70,33 @@ def test_duplicate_reserve_rejected():
             {"0xaaa": 2000, "0xbbb": 1},
             "0xalice",
         )
+
+
+def test_negative_reserve_balance_identifies_asset():
+    import pandas as pd
+    import pytest
+
+    from position_exposure import value_wallet_reserves
+
+    raw = pd.DataFrame([{
+        "wallet": "0xabc",
+        "underlying": "0xasset",
+        "symbol": "WETH",
+        "decimals": 18,
+        "atoken_balance_raw": -1,
+        "debt_raw": 0,
+        "collateral_enabled": True,
+    }])
+
+    with pytest.raises(ValueError, match="Negative reserve balance") as exc:
+        value_wallet_reserves(
+            raw,
+            {"0xasset": 2000},
+            "0xabc",
+        )
+
+    message = str(exc.value)
+
+    assert "wallet=0xabc" in message
+    assert "asset=WETH" in message
+    assert "collateral_raw=-1" in message
