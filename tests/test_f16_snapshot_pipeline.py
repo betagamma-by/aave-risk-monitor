@@ -13,7 +13,9 @@ import data_fetcher as d
 def test_prepare_balances_pins_gho(mock_verify):
     raw = pd.DataFrame({
         "symbol": ["WETH"],
-        "atoken_now_raw": [1000],
+        "scaled_atoken_raw": [1000],
+            "atoken_balance_raw": [1000],
+            "atoken_now_raw": [1000],
         "debt_now_raw": [500],
     })
 
@@ -33,9 +35,9 @@ def test_prepare_balances_pins_gho(mock_verify):
             block_identifier=12345,
         )
 
-    accrue.assert_called_once_with(
-        raw, now_ts=1700000000
-    )
+    assert accrue.call_count == 1
+    assert accrue.call_args.kwargs == {"now_ts": 1700000000}
+    assert accrue.call_args.args[0]["scaled_atoken_raw"].iloc[0] == 1000
     gho.assert_called_once_with(
         raw, block_identifier=12345
     )

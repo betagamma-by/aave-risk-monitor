@@ -47,6 +47,12 @@ def show_liquidation_wallet_selector(results, prepared, stressed_prices, key, sn
         wallet_state_key = f"{key}_previous_wallet"
 
         if st.session_state.get(wallet_state_key) != wallet:
+            st.session_state.pop(
+                f"{key}_current_verification", None
+            )
+            st.session_state.pop(
+                f"{key}_hf_verification", None
+            )
             st.session_state[wallet_state_key] = wallet
             st.rerun()
 
@@ -56,10 +62,145 @@ def show_liquidation_wallet_selector(results, prepared, stressed_prices, key, sn
         ].iloc[0]
 
         st.code(wallet)
-        st.metric(
-            "Simulated Health Factor",
-            f"{float(position['stressed_hf']):.6f}",
+
+        # F17: compare monitor baseline against Aave at the same block.
+        from decimal import Decimal
+        from wallet_hf_comparison import compare_wallet_health_factors
+
+        baseline_hf = position["baseline_hf"]
+        stressed_hf = position["stressed_hf"]
+        verification_key = f"{key}_hf_verification"
+
+        # F17: invalidate verification when the snapshot changes.
+        snapshot_state_key = f"{key}_hf_snapshot_block"
+
+        if st.session_state.get(snapshot_state_key) != snapshot_block:
+            st.session_state.pop(verification_key, None)
+            st.session_state[snapshot_state_key] = snapshot_block
+
+        st.markdown("#### Wallet Health Factor")
+
+        c1, c2 = st.columns(2)
+        c1.metric("Monitor Baseline HF", f"{float(baseline_hf):.6f}")
+        c2.metric("Simulated HF (after shock)", f"{float(stressed_hf):.6f}")
+
+        st.caption(
+            f"Both values use snapshot block {snapshot_block:,}. "
+            "Only the simulated HF includes the selected price shock."
         )
+
+        if st.button(
+            "Verify Historical & Current HF (on-chain)",
+            key=f"{key}_verify_hf",
+        ):
+            from current_wallet_verification import fetch_current_wallet_account
+
+            st.session_state.pop(verification_key, None)
+
+            try:
+                with st.spinner("Verifying against Aave Pool..."):
+                    historical = fetch_current_wallet_account(
+                        wallet,
+                        block_identifier=int(snapshot_block),
+                    )
+                    current = fetch_current_wallet_account(wallet)
+
+                if (
+                    historical["wallet"] != wallet.lower()
+                    or current["wallet"] != wallet.lower()
+                    or historical["block_number"] != int(snapshot_block)
+                ):
+                    raise ValueError("Verification wallet/block mismatch")
+
+                st.session_state[verification_key] = {
+                    "historical": historical,
+                    "current": current,
+                }
+            except Exception as exc:
+                st.error(
+                    "On-chain HF verification failed. "
+                    "No verified comparison is available."
+                )
+                st.caption(f"Error type: {type(exc).__name__}")
+
+        verification = st.session_state.get(verification_key)
+
+        verified = (
+            isinstance(verification, dict)
+            and "historical" in verification
+            and "current" in verification
+            and verification["historical"]["wallet"] == wallet.lower()
+            and verification["current"]["wallet"] == wallet.lower()
+            and verification["historical"]["block_number"] == snapshot_block
+        )
+
+        if verified:
+            historical = verification["historical"]
+            current = verification["current"]
+
+            c3, c4 = st.columns(2)
+
+            historical_hf = historical["health_factor"]
+            current_hf = current["health_factor"]
+
+            c3.metric(
+                "Aave Historical HF",
+                f"{historical_hf:.6f}"
+                if historical_hf is not None else "N/A — no debt",
+            )
+            c4.metric(
+                "Aave Current HF",
+                f"{current_hf:.6f}"
+                if current_hf is not None else "N/A — no debt",
+            )
+
+            st.caption(
+                f"Aave historical block: {historical['block_number']:,} | "
+                f"Aave current verification block: {current['block_number']:,}. "
+                "Both are unstressed on-chain readings."
+            )
+
+            comparison = compare_wallet_health_factors(
+                baseline_hf,
+                historical_hf,
+                current_hf,
+            )
+
+            error = comparison["model_error_pct"]
+
+            if error is None:
+                st.info("HF model comparison unavailable for this wallet.")
+            else:
+                st.metric(
+                    "Monitor vs Aave Historical Error",
+                    f"{error:.9f}%",
+                )
+                if error >= Decimal("0.1"):
+                    st.warning(
+                        "Historical HF discrepancy exceeds the "
+                        "0.1% diagnostic tolerance."
+                    )
+
+            if comparison["chain_delta"] is not None:
+                st.caption(
+                    "Historical-to-current on-chain HF change: "
+                    f"{comparison['chain_delta']:+.6f}. "
+                    "This is not the simulated shock effect."
+                )
+
+            if current_hf is None:
+                st.info("No debt at the current verification block.")
+            elif current_hf < 1:
+                st.warning(
+                    "Current on-chain HF is below 1 at the verification "
+                    "block. This does not guarantee an executable liquidation."
+                )
+
+        else:
+            st.caption(
+                "Aave historical and current HF have not been verified "
+                "for this wallet and snapshot block."
+            )
 
         reserves = prepared.loc[
             prepared["wallet"].str.lower() == wallet.lower()
@@ -221,11 +362,12 @@ st.warning(
     "**HISTORICAL DATA NOTICE**\n\n"
     "Borrower positions, Oracle prices, and liquidation configurations "
     "are requested at the same historical Ethereum block. "
-    "Tiny negative subgraph debt values are checked against on-chain "
-    "balances before correction.\n\n"
+    "Tiny negative subgraph debt and collateral balances are checked "
+    "against on-chain balances before correction.\n\n"
     "**Important:** Liquidation estimates are indicative simulations, "
     "not executable quotes. Wallet balances may have changed since "
-    "the snapshot, and current on-chain positions are not yet verified."
+    "the snapshot. Selected wallets can be verified on demand "
+    "against Aave Pool at historical and current blocks."
 )
 
 st.title("⚠️ Aave V3 Liquidation Risk Monitor")
@@ -343,9 +485,11 @@ c3.metric(
 )
 
 st.caption(
-    "Verification covers negative subgraph debt-dust entries at the "
-    "selected historical Ethereum block, when present. "
-    "It does not verify the wallet's latest on-chain position."
+    "Debt-dust verification covers negative subgraph debt entries "
+    "at the selected historical block. Negative collateral dust is "
+    "separately verified on-chain before balance preparation. "
+    "The status above reports debt verification only. "
+    "Current-wallet verification is available on demand."
 )
 
 if data_source == "snapshot":

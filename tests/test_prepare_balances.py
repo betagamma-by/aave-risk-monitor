@@ -74,6 +74,7 @@ def test_gho_override_is_preserved(monkeypatch):
 
     raw = pd.DataFrame([{
         "symbol": "GHO",
+        "scaled_atoken_raw": 0,
         "atoken_balance_raw": 0,
         "debt_raw": 100,
     }])
