@@ -23,6 +23,15 @@ ACCOUNT_DATA_ABI = [{
 
 
 def fetch_current_wallet_account(wallet, rpc_url=None, pool_address=None, block_identifier=None):
+    # Anchor the call to a specific current block.
+    if block_identifier is not None and (
+        isinstance(block_identifier, bool)
+        or not isinstance(block_identifier, int)
+        or block_identifier < 0
+    ):
+        raise ValueError("Invalid historical block identifier")
+
+
     rpc = rpc_url or os.environ["ETH_RPC_URL"]
     pool_addr = pool_address or os.environ["AAVE_POOL_ADDRESS"]
 
@@ -40,14 +49,6 @@ def fetch_current_wallet_account(wallet, rpc_url=None, pool_address=None, block_
         address=Web3.to_checksum_address(pool_addr),
         abi=ACCOUNT_DATA_ABI,
     )
-
-    # Anchor the call to a specific current block.
-    if block_identifier is not None and (
-        isinstance(block_identifier, bool)
-        or not isinstance(block_identifier, int)
-        or block_identifier < 0
-    ):
-        raise ValueError("Invalid historical block identifier")
 
     block = (
         w3.eth.block_number
