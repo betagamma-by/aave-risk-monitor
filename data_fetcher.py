@@ -339,6 +339,17 @@ def prepare_balances(raw, now_ts=None, block_identifier=None):
                 f"Historical debt verification failed: {exc}"
             ) from exc
 
+    # F17: correct negative collateral dust only after historical
+    # aToken balanceOf and scaledBalanceOf both confirm zero.
+    from historical_collateral_verification import (
+        normalize_verified_negative_collateral,
+    )
+
+    raw = normalize_verified_negative_collateral(
+        raw,
+        block_identifier=block_identifier,
+    )
+
     prepared = add_accrued_balances(raw, now_ts=now_ts)
     prepared = (
         override_gho_debt(prepared)
