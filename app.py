@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from recovery import load_with_fallback
 from f11_fallback import load_github_snapshot
 from stress_engine import simulate_price_shock
+from zoneinfo import ZoneInfo
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 def show_liquidation_wallet_selector(results, prepared, stressed_prices, key, snapshot_block, data_source, scenario_inputs_present, historical_debt_verified):
 
@@ -352,22 +357,27 @@ def load_liquidation_configs(emode_ids, block_identifier=None):
 
     return reserve_configs, emode_configs
 
+def format_snapshot_time(timestamp):
+    if timestamp is None:
+        return "Unavailable"
+
+    dt = datetime.fromtimestamp(
+        int(timestamp),
+        tz=timezone.utc,
+    ).astimezone(ZoneInfo("Asia/Kuala_Lumpur"))
+
+    return dt.strftime("%d %b %Y, %I:%M %p (GMT+8)")
+
 st.set_page_config(
     page_title="Aave V3 Liquidation Risk Monitor",
     page_icon="⚠️",
     layout="wide"
 )
 
-st.warning(
-    "**HISTORICAL DATA NOTICE**\n\n"
-    "Borrower positions, Oracle prices, and liquidation configurations "
-    "are requested at the same historical Ethereum block. "
-    "Tiny negative subgraph debt and collateral balances are checked "
-    "against on-chain balances before correction.\n\n"
-    "**Important:** Liquidation estimates are indicative simulations, "
-    "not executable quotes. Wallet balances may have changed since "
-    "the snapshot. Selected wallets can be verified on demand "
-    "against Aave Pool at historical and current blocks."
+st.caption(
+    "Data reflects a historical Ethereum block, not continuously "
+    "updated wallet balances. Liquidation estimates are hypothetical, "
+    "not executable quotes."
 )
 
 st.title("⚠️ Aave V3 Liquidation Risk Monitor")
@@ -462,41 +472,49 @@ with st.spinner("Loading Aave positions..."):
         st.caption(f"Error type: {type(e).__name__}")
         st.stop()
 
-st.subheader("Data Integrity")
-
-c1, c2, c3 = st.columns(3)
-
-c1.metric("Data source", data_source.upper())
+st.subheader("Data Overview")
 
 snapshot_block = freshness.get("snapshot_block")
-c2.metric(
-    "Snapshot block",
-    f"{snapshot_block:,}" if snapshot_block is not None else "Unavailable",
-)
 
 verified = (
     data_source == "live"
     and freshness.get("historical_debt_verified") is True
 )
 
-c3.metric(
-    "Historical debt-dust verification",
-    "Passed" if verified else "Not verified",
+c1, c2 = st.columns(2)
+
+c1.metric(
+    "Data source",
+    "Live Ethereum snapshot" if data_source == "live"
+    else "Saved recovery snapshot",
+    help=(
+        "The latest available Ethereum data retrieved by the monitor "
+        "from The Graph and blockchain RPC. Data is captured at a "
+        "specific block, not continuously streamed."
+    ),
 )
 
-st.caption(
-    "Debt-dust verification covers negative subgraph debt entries "
-    "at the selected historical block. Negative collateral dust is "
-    "separately verified on-chain before balance preparation. "
-    "The status above reports debt verification only. "
-    "Current-wallet verification is available on demand."
+c2.metric(
+    "Data as of",
+    (
+        f"Ethereum block #{snapshot_block:,}"
+        if data_source == "live" and snapshot_block is not None
+        else fetched_at.astimezone(
+            ZoneInfo("Asia/Kuala_Lumpur")
+        ).strftime("%d %b %Y, %I:%M %p (GMT+8)")
+    ),
+    help=(
+        "Live data is aligned to a specific Ethereum block. "
+        "Recovery data comes from a previously saved snapshot "
+        "whose source reads were not necessarily block-aligned."
+    ),
 )
 
 if data_source == "snapshot":
     st.warning(
         "⚠️ HISTORICAL SNAPSHOT — Live Aave data is unavailable. "
         f"Showing the last valid snapshot captured at "
-        f"{fetched_at:%Y-%m-%d %H:%M:%S} UTC. "
+        f"{fetched_at.astimezone(ZoneInfo('Asia/Kuala_Lumpur')):%d %b %Y, %I:%M %p} (GMT+8). "
         "These positions and health factors may no longer reflect "
         "current liquidation risk."
     )
@@ -511,29 +529,17 @@ if positions_df.empty:
 # ── Data quality and coverage ───────────────────────────────
 st.divider()
 if data_source == "live":
+    st.caption(
+        "The Graph indexes Ethereum data independently. "
+        "These metrics show how up to date its data is."
+    )
     st.write(f"Ethereum head block: {freshness['chain_block']:,}")
     st.write(f"Subgraph indexed block: {freshness['graph_block']:,}")
     st.write(f"Indexing lag: {freshness['lag_blocks']} blocks")
     status = freshness["status"]
-    st.write(f"Subgraph indexing status: **{status.upper()}**")
-
     st.write(
-        "Position snapshot block:",
-        freshness.get("snapshot_block", "Not recorded"),
-    )
-    st.write(
-        "Position snapshot timestamp:",
-        freshness.get("snapshot_timestamp", "Not recorded"),
-    )
-    st.write(
-        "Positions block pinned:",
-        freshness.get("positions_block_pinned", False),
-    )
-
-    st.caption(
-        "Indexing status measures subgraph freshness only. "
-        "It does not establish block consistency between borrower "
-        "positions, oracle prices, and protocol configurations."
+        "Position snapshot time:",
+        format_snapshot_time(freshness.get("snapshot_timestamp")),
     )
 
     if freshness["lag_blocks"] < 0:
@@ -574,11 +580,11 @@ dropped_small = coverage_stats["dropped_debt_under_100"]
 excluded = excluded_collateral + excluded_debt
 total_omitted = excluded + dropped_small
 
-st.info(
-    "Coverage: This dashboard monitors a sampled subset of Aave V3 "
-    "Ethereum borrowers, not all active borrowers. "
-    "Positions excluded because of missing prices or the minimum "
-    "debt threshold are not represented in the risk statistics."
+st.caption(
+    "Coverage: This monitor analyzes a sampled subset of Aave V3 "
+    "Ethereum borrowers, not the entire market. Wallets excluded "
+    "because of missing prices or minimum debt requirements "
+    "are not included in risk statistics."
 )
 
 with st.expander("Data Quality & Coverage", expanded=False):
@@ -608,99 +614,167 @@ with st.expander("Data Quality & Coverage", expanded=False):
             "Reported risk statistics exclude these positions."
         )
 
-# ── KPI Row ──────────────────────────────────────────────────
-col1, col2, col3, col4 = st.columns(4)
-
-liquidatable = positions_df[
-    positions_df["health_factor"] < 1.0
-]
-
-near_liquidation = positions_df[
-    (positions_df["health_factor"] >= 1.0)
-    & (positions_df["health_factor"] < 1.05)
-]
-
-critical = positions_df[
-    positions_df["risk_tier"] == "CRITICAL (HF < 1.05)"
-]
-
-high = positions_df[
-    positions_df["risk_tier"] == "HIGH (HF 1.05–1.2)"
-]
-total_debt_monitored = positions_df["debt_usd"].sum()
-
-col1.metric("Positions Monitored", len(positions_df))
-col2.metric(
-    "Critical Risk (HF < 1.05)",
-    len(critical)
-)
-col2.markdown(
-    f"""
-    <div style="
-        background-color: rgba(255, 75, 75, 0.12);
-        color: #FF4B4B;
-        padding: 8px 12px;
-        border-radius: 6px;
-        font-size: 14px;
-        font-weight: 600;
-        margin-top: 4px;
-    ">
-        ${critical['debt_usd'].sum():,.0f} Combined Outstanding Debt
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-col3.metric("High Risk (HF 1.05–1.2)", len(high))
-col4.metric("Total Debt Monitored", f"${total_debt_monitored:,.0f}")
-if len(liquidatable) + len(near_liquidation) != len(critical):
-    st.error("Liquidation risk classification mismatch detected.")
-st.caption(
-    f"Critical positions: {len(liquidatable):,} currently "
-    f"liquidatable (HF < 1.0) + "
-    f"{len(near_liquidation):,} near liquidation "
-    f"(1.0 ≤ HF < 1.05) = {len(critical):,} total."
-)
 st.divider()
+st.subheader("Portfolio Risk Overview")
+
+# ── Portfolio Risk Overview ──
+
+hf = positions_df["health_factor"]
+
+liquidatable = positions_df[hf < 1.0]
+near_liquidation = positions_df[(hf >= 1.0) & (hf < 1.05)]
+high = positions_df[(hf >= 1.05) & (hf < 1.20)]
+elevated = positions_df[(hf >= 1.20) & (hf < 1.50)]
+lower_risk = positions_df[hf >= 1.50]
+
+total_debt_monitored = positions_df["debt_usd"].sum()
+near_debt = near_liquidation["debt_usd"].sum()
+liquidatable_debt = liquidatable["debt_usd"].sum()
+
+debt_col1, debt_col2, debt_col3 = st.columns(3)
+
+debt_col1.metric(
+    "Positions Monitored",
+    f"{len(positions_df):,}",
+)
+
+debt_col2.metric(
+    "Total Debt Monitored",
+    f"${total_debt_monitored:,.2f}",
+)
+
+debt_col3.metric(
+    "Debt Near or Below Liquidation",
+    f"${liquidatable_debt + near_debt:,.2f}",
+    help="Combined outstanding debt of monitored wallets with "
+         "HF below 1.05. This is not the amount immediately "
+         "liquidatable or an estimate of realized losses.",
+)
+
+cols = st.columns(5)
+
+cols[0].metric(
+    "Liquidatable",
+    f"{len(liquidatable):,}",
+    help="Health Factor below 1.00. These positions meet "
+         "Aave's HF liquidation eligibility condition.",
+)
+
+cols[1].metric(
+    "Near Liquidation",
+    f"{len(near_liquidation):,}",
+    help="Health Factor from 1.00 to below 1.05. "
+         "Monitor-defined risk category.",
+)
+
+cols[2].metric(
+    "High Risk",
+    f"{len(high):,}",
+    help="Health Factor from 1.05 to below 1.20. "
+         "Monitor-defined risk category.",
+)
+
+cols[3].metric(
+    "Elevated Risk",
+    f"{len(elevated):,}",
+    help="Health Factor from 1.20 to below 1.50. "
+         "Monitor-defined risk category.",
+)
+
+cols[4].metric(
+    "Lower Risk",
+    f"{len(lower_risk):,}",
+    help="Health Factor of 1.50 or above. "
+         "Does not mean risk-free.",
+)
+
+if (
+    len(liquidatable)
+    + len(near_liquidation)
+    + len(high)
+    + len(elevated)
+    + len(lower_risk)
+    != len(positions_df)
+):
+    st.error("Risk category accounting mismatch detected.")
+
+st.caption(
+    "Risk categories above HF 1.00 are monitor-defined. "
+    "Aave liquidation eligibility begins below HF 1.00."
+)
 
 # ── Section 1: Risk Distribution ─────────────────────────────
+st.divider()
 st.subheader("Health Factor Distribution")
-col_a, col_b = st.columns(2)
 
-with col_a:
-    fig_hist = px.histogram(
-        positions_df,
-        x="health_factor",
-        nbins=20,
-        color="risk_tier",
-        title="Distribution of Health Factors (monitored positions)",
-        labels={"health_factor": "Health Factor", "count": "# Positions"},
-        color_discrete_map={
-            "CRITICAL (HF < 1.05)": "#d62728",
-            "HIGH (HF 1.05–1.2)": "#ff7f0e",
-            "ELEVATED (HF 1.2–1.5)": "#ffdd57",
-            "SAFE": "#2ca02c"
-        }
-    )
-    st.plotly_chart(fig_hist, width="stretch")
+risk_order = [
+    "Liquidatable",
+    "Near Liquidation",
+    "High Risk",
+    "Elevated Risk",
+    "Lower Risk",
+]
 
-with col_b:
-    risk_counts = positions_df["risk_tier"].value_counts().reset_index()
-    risk_counts.columns = ["risk_tier", "count"]
-    fig_pie = px.pie(
-        risk_counts,
-        names="risk_tier",
-        values="count",
-        title="Risk Tier Breakdown",
-        color="risk_tier",
-        color_discrete_map={
-            "CRITICAL (HF < 1.05)": "#d62728",
-            "HIGH (HF 1.05–1.2)": "#ff7f0e",
-            "ELEVATED (HF 1.2–1.5)": "#ffdd57",
-            "SAFE": "#2ca02c"
-        }
-    )
-    st.plotly_chart(fig_pie, width="stretch")
+risk_colors = {
+    "Liquidatable": "#d62728",
+    "Near Liquidation": "#ff7f0e",
+    "High Risk": "#e6b800",
+    "Elevated Risk": "#4c78a8",
+    "Lower Risk": "#2ca02c",
+}
 
+risk_labels = [
+    "Liquidatable (< 1.00)",
+    "Near Liquidation (1.00–1.05)",
+    "High Risk (1.05–1.20)",
+    "Elevated (1.20–1.50)",
+    "Lower Risk (≥ 1.50)",
+]
+
+risk_distribution = pd.DataFrame({
+    "Risk Category": risk_labels,
+    "Positions": [
+        len(liquidatable),
+        len(near_liquidation),
+        len(high),
+        len(elevated),
+        len(lower_risk),
+    ],
+})
+
+risk_colors = dict(zip(
+    risk_labels,
+    ["#d62728", "#ff7f0e", "#e6b800", "#4c78a8", "#2ca02c"],
+))
+
+fig_risk = px.bar(
+    risk_distribution,
+    x="Risk Category",
+    y="Positions",
+    color="Risk Category",
+    color_discrete_map=risk_colors,
+    category_orders={"Risk Category": risk_labels},
+    text="Positions",
+)
+
+fig_risk.update_traces(
+    textposition="outside",
+    hovertemplate="%{x}: %{y:,} positions<extra></extra>",
+)
+
+fig_risk.update_layout(
+    showlegend=False,
+    yaxis_title="Number of Positions",
+    xaxis_title=None,
+    margin=dict(t=30, b=20),
+)
+
+st.plotly_chart(fig_risk, width="stretch")
+
+st.caption(
+    "Health Factor below 1.00 indicates liquidation eligibility. "
+    "Other ranges are monitoring categories, not official Aave tiers."
+)
 # ── Section 2: Collateral Concentration ──────────────────────
 st.subheader("Collateral Concentration Among Monitored Positions")
 
@@ -760,8 +834,11 @@ scenarios["Collateral Held by These Positions (USD)"] = [
 
 st.dataframe(scenarios, width="stretch", hide_index=True)
 
-
-st.subheader("F13 — Asset-Specific Price Shock")
+st.subheader("Asset-Specific Price Shock")
+st.caption(
+    "Explore how changing one asset's price affects monitored wallets. "
+    "Results are hypothetical."
+)
 
 if scenario_inputs is None:
     st.info(
@@ -789,18 +866,22 @@ else:
             for r in assets.itertuples()
         }
 
-        asset_label = st.selectbox(
-            "Asset to stress",
-            options=list(options),
-        )
+        asset_col, shock_col = st.columns([1, 2])
 
-        drop_pct = st.slider(
-            "Price decrease (%)",
-            min_value=0,
-            max_value=80,
-            value=20,
-            step=5,
-        )
+        with asset_col:
+            asset_label = st.selectbox(
+                "Asset",
+                options=list(options),
+            )
+
+        with shock_col:
+            drop_pct = st.slider(
+                "Price decrease (%)",
+                min_value=0,
+                max_value=80,
+                value=20,
+                step=5,
+            )
 
         try:
             result, stressed_prices_result = simulate_price_shock(
@@ -861,19 +942,16 @@ else:
             )
 
             st.caption(
-                "Hypothetical single-asset price shock. "
-                "Debt shown is outstanding debt, not expected losses. "
-                "No liquidation execution is simulated."
+                "Simulated liquidation eligibility, not actual liquidations. "
+                "Debt shown is outstanding debt, not expected losses."
             )
 
             st.markdown("#### 20 Lowest Simulated Health Factors")
 
             st.caption(
-                "Shows the 20 monitored wallets with the lowest Health Factors "
-                "after the selected price shock. Wallets are ranked by simulated HF, "
-                "regardless of whether they hold or borrow the selected asset. "
-                "Some wallets may already be liquidatable or remain unaffected "
-                "by this scenario."
+                "Lowest simulated HF among monitored wallets, including those "
+                "unaffected by the selected asset. "
+                "HF Change = simulated HF − baseline HF."
             )
 
             st.caption(
@@ -907,10 +985,8 @@ else:
 
         st.divider()
         st.subheader("Multi-Asset Stress Scenario")
-
         st.caption(
-            "Simulate several asset price changes together. "
-            "Scenario presets are illustrative assumptions, not forecasts."
+            "Combine price changes using a preset scenario or your own assumptions."
         )
 
         scenario = st.selectbox(
@@ -922,6 +998,7 @@ else:
                 "Custom",
             ],
             key="multi_scenario",
+            help="Presets are illustrative stress assumptions, not forecasts.",
         )
 
         # Build asset selection from actual monitored reserves.
@@ -940,7 +1017,7 @@ else:
             changes = {}
             for label in selected_assets:
                 pct = st.slider(
-                    f"{label} price change (%)",
+                    f"{label} change (%)",
                     min_value=-80,
                     max_value=100,
                     value=-20,
@@ -961,12 +1038,10 @@ else:
                 )
 
         if changes:
-            st.markdown("#### Assets With Simulated Price Changes")
+            st.markdown("#### Scenario Price Changes")
 
             st.caption(
-                "These are token contract addresses, NOT borrower wallet addresses. "
-                "Each price change applies to that token across all monitored wallets. "
-                "Percentages are hypothetical assumptions, not market forecasts."
+                "Price changes apply to each selected token across monitored wallets."
             )
 
             asset_names = dict(zip(assets["underlying"], assets["symbol"]))
@@ -982,6 +1057,20 @@ else:
                     }
                     for address, change in changes.items()
                 ]),
+                column_config={
+                    "Current Oracle Price (USD)": st.column_config.NumberColumn(
+                        "Current Oracle Price (USD)",
+                        format="$%.2f",
+                    ),
+                    "Simulated Price Change (%)": st.column_config.NumberColumn(
+                        "Simulated Price Change (%)",
+                        format="%.2f%%",
+                    ),
+                    "Simulated Price (USD)": st.column_config.NumberColumn(
+                        "Simulated Price (USD)",
+                        format="$%.2f",
+                    ),
+                },
                 width="stretch",
                 hide_index=True,
             )
