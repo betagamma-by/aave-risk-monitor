@@ -3,3 +3,5 @@ pandas
 requests
 plotly
 web3
+python-dotenv
+pyarrow
