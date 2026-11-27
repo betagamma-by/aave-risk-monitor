@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "methodology": "phase2-fixes-gho-onchain-override",
+  "git_commit": "96683ebe71115ee813a464a229b1f6785f5d70a0",
+  "started_utc": "2026-11-27T00:11:15+00:00",
+  "completed_utc": "2026-11-27T00:11:21+00:00",
+  "top_reserves": 8,
+  "borrowers_per_reserve": 60,
+  "price_source": "aave-oracle",
+  "graph_block_before": 26502873,
+  "graph_block_after": 26502873,
+  "ethereum_head_before": 26502873,
+  "ethereum_head_after": 26502873,
+  "wallet_stats": {
+    "wallets_fetched": 462,
+    "wallets_in_emode": 91,
+    "excluded_unpriced_collateral": 0,
+    "excluded_unpriced_debt": 0,
+    "dropped_debt_under_100": 0
+  },
+  "positions_saved": 462,
+  "note": "Source reads are not all pinned to one block. Historical research requires this caveat."
+}
